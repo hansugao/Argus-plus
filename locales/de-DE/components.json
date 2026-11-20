@@ -8,11 +8,12 @@
   "tray": {
     "icon": {
       "title": "Symbol im Infobereich",
-      "desc": "Verlauf zeigt die letzten CPU-Messwerte als Spalten, Anteil zeigt die aktuelle Auslastung als Punkteraster und Zahl als Prozentwert. Ab 80 % werden sie bernsteinfarben.",
+      "desc": "Verlauf zeigt die letzten CPU-Messwerte als Spalten, Anteil zeigt die aktuelle Auslastung als Punkteraster und Zahl als Prozentwert; alle drei werden ab 80 % bernsteinfarben. Läufer bewegt die Katze im Tempo der CPU-Auslastung und färbt sie nach der Speicherauslastung: ab 70 % bernsteinfarben, ab 90 % rot.",
       "logo": "App-Symbol",
       "load": "Verlauf",
       "share": "Anteil",
-      "number": "Zahl"
+      "number": "Zahl",
+      "runner": "Läufer"
     },
     "card": {
       "title": "Hoverkarte",
@@ -188,6 +189,25 @@
       "curves": "Kurven",
       "capsules": "Kapseln",
       "figures": "Große Zahlen"
+    },
+    "size": {
+      "title": "Textgröße",
+      "desc": "Textgröße im Beschriftungsstil; eine niedrige Taskleiste zeigt eine Zeile.",
+      "small": "Klein",
+      "medium": "Mittel",
+      "large": "Groß"
+    },
+    "rows": {
+      "title": "Zeilen",
+      "desc": "Beschriftungen stehen in zwei Zeilen oder einer; eine niedrige Taskleiste zeigt immer eine.",
+      "two": "Zwei Zeilen",
+      "one": "Eine Zeile"
+    },
+    "color": {
+      "title": "Wertefarbe",
+      "desc": "Beschriftungen färben ihre Werte nach der Messung; ausgeschaltet übernehmen sie die Textfarbe der Taskleiste. Hohe Werte bleiben bernsteinfarben.",
+      "tone": "Farbig",
+      "ink": "Einfarbig"
     },
     "panel": {
       "settings": "Komponenteneinstellungen…",

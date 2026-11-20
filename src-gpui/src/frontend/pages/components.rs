@@ -237,7 +237,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let looks = ["logo", "load", "share", "number"];
+        let looks = ["logo", "load", "share", "number", "runner"];
         let look = text(settings, "trayIcon");
         let icon = self.segments(
             "setting-trayIcon",
@@ -850,6 +850,7 @@ impl Desktop {
             cx,
         );
         let style = text(&settings["taskbarMonitor"], "style");
+        let labels = style.is_empty() || style == "labels";
         let style = self.segments(
             "setting-taskbarStyle",
             TASKBAR_STYLES
@@ -865,7 +866,37 @@ impl Desktop {
                 .collect(),
             cx,
         );
-        vec![
+        let rows = self.segments(
+            "setting-taskbarRows",
+            [(2, "two"), (1, "one")]
+                .iter()
+                .map(|(value, name)| {
+                    (
+                        label(&format!("components.taskbar.rows.{name}")),
+                        None,
+                        Action::Invoke(command.into(), json!({ "rows": value })),
+                        monitor.rows.clamp(1, 2) == *value,
+                    )
+                })
+                .collect(),
+            cx,
+        );
+        let colored = self.segments(
+            "setting-taskbarColor",
+            [(true, "tone"), (false, "ink")]
+                .iter()
+                .map(|(value, name)| {
+                    (
+                        label(&format!("components.taskbar.color.{name}")),
+                        None,
+                        Action::Invoke(command.into(), json!({ "colored": value })),
+                        monitor.colored == *value,
+                    )
+                })
+                .collect(),
+            cx,
+        );
+        let mut cards = vec![
             self.setting_text(
                 "taskbarMonitor",
                 "GaugeIcon",
@@ -887,14 +918,56 @@ impl Desktop {
                 "components.taskbar.style.desc",
                 vec![style],
             ),
-            self.setting_text(
-                "taskbarPlace",
-                "FitWidthIcon",
-                "components.taskbar.place.title",
-                "components.taskbar.place.desc",
-                vec![place],
-            ),
-        ]
+        ];
+        // The text's size, one row or two, and the values' colours, are the
+        // labels style's own: the other styles have no room to grow their
+        // text, need two rows and colour their values.
+        if labels {
+            let size = self.segments(
+                "setting-taskbarSize",
+                ["small", "medium", "large"]
+                    .iter()
+                    .map(|value| {
+                        (
+                            label(&format!("components.taskbar.size.{value}")),
+                            None,
+                            Action::Invoke(command.into(), json!({ "size": value })),
+                            String::from(monitor.size) == *value,
+                        )
+                    })
+                    .collect(),
+                cx,
+            );
+            cards.push(self.setting_text(
+                "taskbarSize",
+                "FontSizeIcon",
+                "components.taskbar.size.title",
+                "components.taskbar.size.desc",
+                vec![size],
+            ));
+            cards.push(self.setting_text(
+                "taskbarRows",
+                "ColumnsIcon",
+                "components.taskbar.rows.title",
+                "components.taskbar.rows.desc",
+                vec![rows],
+            ));
+            cards.push(self.setting_text(
+                "taskbarColor",
+                "ThemeIcon",
+                "components.taskbar.color.title",
+                "components.taskbar.color.desc",
+                vec![colored],
+            ));
+        }
+        cards.push(self.setting_text(
+            "taskbarPlace",
+            "FitWidthIcon",
+            "components.taskbar.place.title",
+            "components.taskbar.place.desc",
+            vec![place],
+        ));
+        cards
     }
 
     /// Where Settings points to the tray's settings on this page.

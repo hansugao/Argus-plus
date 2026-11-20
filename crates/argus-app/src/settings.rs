@@ -85,8 +85,9 @@ impl From<Theme> for String {
 }
 
 /// What the tray icon shows: the app's icon, or the CPU load live as the
-/// recent samples (`Load`), as the share of a hundred dots, or as a figure.
-/// Stored as its name; one this version does not know reads as the default.
+/// recent samples (`Load`), as the share of a hundred dots, as a figure, or
+/// as a runner whose pace follows the load. Stored as its name; one this
+/// version does not know reads as the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum TrayIcon {
@@ -95,6 +96,7 @@ pub enum TrayIcon {
     Load,
     Share,
     Number,
+    Runner,
 }
 
 impl From<String> for TrayIcon {
@@ -103,6 +105,7 @@ impl From<String> for TrayIcon {
             "logo" => TrayIcon::Logo,
             "share" => TrayIcon::Share,
             "number" => TrayIcon::Number,
+            "runner" => TrayIcon::Runner,
             _ => TrayIcon::Load,
         }
     }
@@ -115,6 +118,7 @@ impl From<TrayIcon> for String {
             TrayIcon::Load => "load",
             TrayIcon::Share => "share",
             TrayIcon::Number => "number",
+            TrayIcon::Runner => "runner",
         }
         .into()
     }
@@ -438,6 +442,49 @@ impl From<TaskbarStyle> for String {
     }
 }
 
+/// How large the taskbar monitor's text is. Stored as its name; one this
+/// version does not know reads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum TaskbarSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl TaskbarSize {
+    /// What it multiplies the text's size by.
+    pub fn factor(self) -> f32 {
+        match self {
+            TaskbarSize::Small => 0.85,
+            TaskbarSize::Medium => 1.,
+            TaskbarSize::Large => 1.15,
+        }
+    }
+}
+
+impl From<String> for TaskbarSize {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "small" => TaskbarSize::Small,
+            "large" => TaskbarSize::Large,
+            _ => TaskbarSize::Medium,
+        }
+    }
+}
+
+impl From<TaskbarSize> for String {
+    fn from(size: TaskbarSize) -> Self {
+        match size {
+            TaskbarSize::Small => "small",
+            TaskbarSize::Medium => "medium",
+            TaskbarSize::Large => "large",
+        }
+        .into()
+    }
+}
+
 /// The taskbar monitor: live readings on the primary display's taskbar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -448,6 +495,13 @@ pub struct TaskbarMonitor {
     pub metrics: Vec<Reading>,
     pub place: TaskbarPlace,
     pub style: TaskbarStyle,
+    /// The labels' text size; the other styles keep their own.
+    pub size: TaskbarSize,
+    /// One row of labels or two; other styles need two rows and ignore it.
+    pub rows: u8,
+    /// Values in their reading's colour rather than the taskbar's own, in
+    /// the labels style; the other styles colour their values anyway.
+    pub colored: bool,
 }
 
 impl Default for TaskbarMonitor {
@@ -459,6 +513,9 @@ impl Default for TaskbarMonitor {
                 .to_vec(),
             place: TaskbarPlace::default(),
             style: TaskbarStyle::default(),
+            size: TaskbarSize::default(),
+            rows: 2,
+            colored: true,
         }
     }
 }
@@ -825,6 +882,7 @@ mod tests {
             TrayIcon::Load,
             TrayIcon::Share,
             TrayIcon::Number,
+            TrayIcon::Runner,
         ] {
             for menu in [TrayMenu::Panel, TrayMenu::Menu] {
                 let saved = Settings {
@@ -868,9 +926,23 @@ mod tests {
         assert!(newer.taskbar_monitor.metrics.is_empty());
         assert_eq!(newer.taskbar_monitor.place, TaskbarPlace::Tray);
         assert_eq!(newer.taskbar_monitor.style, TaskbarStyle::Labels);
+        // Settings without the later appearance fields show the defaults.
+        assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Medium);
+        assert_eq!(newer.taskbar_monitor.rows, 2);
+        assert!(newer.taskbar_monitor.colored);
         let styled: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "figures"}}"#).unwrap();
         assert_eq!(styled.taskbar_monitor.style, TaskbarStyle::Figures);
+        let sized: Settings = serde_json::from_str(
+            r#"{"taskbarMonitor": {"size": "large", "rows": 1, "colored": false}}"#,
+        )
+        .unwrap();
+        assert_eq!(sized.taskbar_monitor.size, TaskbarSize::Large);
+        assert_eq!(sized.taskbar_monitor.rows, 1);
+        assert!(!sized.taskbar_monitor.colored);
+        let unnamed: Settings =
+            serde_json::from_str(r#"{"taskbarMonitor": {"size": "huge"}}"#).unwrap();
+        assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Medium);
         let capsules: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "capsules"}}"#).unwrap();
         assert_eq!(capsules.taskbar_monitor.style, TaskbarStyle::Capsules);
@@ -914,6 +986,9 @@ mod tests {
                 ],
                 place: TaskbarPlace::Start,
                 style: TaskbarStyle::Curves,
+                size: TaskbarSize::Large,
+                rows: 1,
+                colored: false,
             },
             ..Settings::default()
         };

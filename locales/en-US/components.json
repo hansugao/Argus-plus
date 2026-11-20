@@ -8,11 +8,12 @@
   "tray": {
     "icon": {
       "title": "Tray icon",
-      "desc": "Trend shows the latest CPU samples as columns, Share lights a grid of dots for the current usage, and Number shows the percentage. All turn amber from 80%.",
+      "desc": "Trend shows the latest CPU samples as columns, Share lights a grid of dots for the current usage, and Number shows the percentage; all three turn amber from 80%. Runner moves the cat at a pace set by CPU usage and colours it by memory use: amber from 70%, red from 90%.",
       "logo": "App icon",
       "load": "Trend",
       "share": "Share",
-      "number": "Number"
+      "number": "Number",
+      "runner": "Runner"
     },
     "card": {
       "title": "Hover card",
@@ -188,6 +189,25 @@
       "curves": "Curves",
       "capsules": "Capsules",
       "figures": "Large figures"
+    },
+    "size": {
+      "title": "Text size",
+      "desc": "The text size in the labels style; a low taskbar keeps it to one row.",
+      "small": "Small",
+      "medium": "Medium",
+      "large": "Large"
+    },
+    "rows": {
+      "title": "Rows",
+      "desc": "Labels take two rows or one; a low taskbar always shows one.",
+      "two": "Two rows",
+      "one": "One row"
+    },
+    "color": {
+      "title": "Value colour",
+      "desc": "Labels colour their values by reading; off, they match the taskbar text. High values still turn amber.",
+      "tone": "Coloured",
+      "ink": "Plain"
     },
     "panel": {
       "settings": "Component settings…",

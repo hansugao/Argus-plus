@@ -8,11 +8,12 @@
   "tray": {
     "icon": {
       "title": "Icône de la zone de notification",
-      "desc": "Tendance affiche les dernières mesures du CPU en colonnes, Part allume une grille de points selon l’utilisation actuelle et Chiffre affiche le pourcentage. À partir de 80 %, ils passent à l’ambre.",
+      "desc": "Tendance affiche les dernières mesures du CPU en colonnes, Part allume une grille de points selon l’utilisation actuelle et Chiffre affiche le pourcentage ; les trois passent à l’ambre à partir de 80 %. Coureur fait courir le chat au rythme de l’utilisation du CPU et le colore selon la mémoire utilisée : ambre à partir de 70 %, rouge à partir de 90 %.",
       "logo": "Icône de l’application",
       "load": "Tendance",
       "share": "Part",
-      "number": "Chiffre"
+      "number": "Chiffre",
+      "runner": "Coureur"
     },
     "card": {
       "title": "Carte au survol",
@@ -188,6 +189,25 @@
       "curves": "Courbes",
       "capsules": "Pastilles",
       "figures": "Grands chiffres"
+    },
+    "size": {
+      "title": "Taille du texte",
+      "desc": "Taille du texte du style étiquettes ; une barre basse le réduit à une ligne.",
+      "small": "Petite",
+      "medium": "Moyenne",
+      "large": "Grande"
+    },
+    "rows": {
+      "title": "Lignes",
+      "desc": "Les étiquettes tiennent sur deux lignes ou une ; une barre basse n’en affiche qu’une.",
+      "two": "Deux lignes",
+      "one": "Une ligne"
+    },
+    "color": {
+      "title": "Couleur des valeurs",
+      "desc": "Les étiquettes colorent leurs valeurs selon la mesure ; désactivé, elles reprennent la couleur du texte de la barre. Les valeurs élevées restent ambre.",
+      "tone": "Couleur",
+      "ink": "Unie"
     },
     "panel": {
       "settings": "Paramètres des composants…",

@@ -23,8 +23,8 @@
 //! A test instance never touches the shell: its monitor attaches to a
 //! stand-in taskbar of its own, shown at the bottom of the z-order without
 //! activation (`--test`).
-use super::taskbar_draw::{Group, Layout, Painter, Reserve, lay_out};
-use crate::settings::{TaskbarPlace, TaskbarStyle};
+use super::taskbar_draw::{Group, Layout, Look, Painter, Reserve, lay_out};
+use crate::settings::TaskbarPlace;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -89,7 +89,7 @@ pub(crate) fn live() -> bool {
 #[derive(Clone)]
 struct State {
     place: TaskbarPlace,
-    style: TaskbarStyle,
+    look: Look,
     groups: Vec<Group>,
     closed: bool,
 }
@@ -119,16 +119,11 @@ pub(crate) struct Monitor {
 
 impl Monitor {
     /// Starts the monitor's thread; clicks on it are posted to `main`.
-    pub fn spawn(
-        main: HWND,
-        place: TaskbarPlace,
-        style: TaskbarStyle,
-        test: bool,
-    ) -> std::io::Result<Self> {
+    pub fn spawn(main: HWND, place: TaskbarPlace, look: Look, test: bool) -> std::io::Result<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 place,
-                style,
+                look,
                 groups: Vec::new(),
                 closed: false,
             }),
@@ -154,10 +149,10 @@ impl Monitor {
         self.shared.post(CHANGED);
     }
 
-    pub fn place(&self, place: TaskbarPlace, style: TaskbarStyle) {
+    pub fn look(&self, place: TaskbarPlace, look: Look) {
         self.update(|state| {
             state.place = place;
-            state.style = style;
+            state.look = look;
         });
     }
 
@@ -210,7 +205,6 @@ struct Worker {
     image: Vec<u8>,
     placed: Option<(i32, i32, i32, i32)>,
     light: bool,
-    hover: bool,
     tracking: bool,
     squeeze: Option<Squeeze>,
     /// How wide the capsules' values have been lately.
@@ -301,7 +295,6 @@ fn run(shared: Arc<Shared>, main: HWND, test: bool) {
             image: Vec::new(),
             placed: None,
             light: super::taskbar_light(),
-            hover: false,
             tracking: false,
             squeeze: None,
             reserve: Reserve::default(),
@@ -610,7 +603,6 @@ impl Worker {
         }
         self.placed = None;
         self.image.clear();
-        self.hover = false;
         self.tracking = false;
         self.shown(None);
     }
@@ -654,7 +646,7 @@ impl Worker {
             return;
         };
         let scale = unsafe { GetDpiForWindow(host) }.max(96) as f32 / 96.;
-        let font = super::taskbar_draw::font_size(scale);
+        let font = super::taskbar_draw::font_size(scale, state.look.size);
         if self
             .painter
             .as_ref()
@@ -670,7 +662,7 @@ impl Worker {
             &state.groups,
             height,
             scale,
-            state.style,
+            state.look,
             painter,
             Some((&mut self.reserve, Instant::now())),
         );
@@ -712,7 +704,7 @@ impl Worker {
         let Some(painter) = &self.painter else {
             return;
         };
-        let Some(image) = painter.paint(&self.layout, self.light, self.hover, scale) else {
+        let Some(image) = painter.paint(&self.layout, self.light, scale) else {
             return;
         };
         if image == self.image {
@@ -726,20 +718,9 @@ impl Worker {
         }
     }
 
-    fn redraw(&mut self) {
-        if let Some(window) = self.window {
-            let scale = self
-                .host
-                .as_ref()
-                .map_or(96, |host| unsafe { GetDpiForWindow(host.window) })
-                .max(96) as f32
-                / 96.;
-            self.draw(window, scale);
-        }
-    }
-
-    /// The pointer moved over the monitor: it lights up until the pointer
-    /// leaves, and the panel's window is made ahead of a right click.
+    /// The pointer moved over the monitor: the panel's window is made ahead
+    /// of a right click. The monitor itself shows no hover state; the
+    /// taskbar's own background stays as it is.
     fn pointer_moved(&mut self, window: HWND) {
         if self.tracking {
             return;
@@ -753,15 +734,11 @@ impl Worker {
             };
             self.tracking = TrackMouseEvent(&mut track).is_ok();
         }
-        self.hover = true;
-        self.redraw();
         self.ask(Action::Warm);
     }
 
     fn pointer_left(&mut self) {
         self.tracking = false;
-        self.hover = false;
-        self.redraw();
     }
 
     /// Passes what the pointer asks for to the main window's thread.

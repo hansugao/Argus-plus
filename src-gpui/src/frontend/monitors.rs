@@ -1434,6 +1434,9 @@ impl Desktop {
         }
         let key = super::charts::hash_of((
             shown.iter().map(Reading::text).collect::<Vec<_>>(),
+            String::from(monitor.size),
+            monitor.rows,
+            monitor.colored,
             light,
             scale.to_bits(),
         ));
@@ -1451,8 +1454,14 @@ impl Desktop {
                 .iter()
                 .map(|style| {
                     let style = TaskbarStyle::from(style.to_string());
+                    let look = crate::shell::TaskbarLook {
+                        style,
+                        size: monitor.size,
+                        rows: monitor.rows,
+                        colored: monitor.colored,
+                    };
                     let (width, height, pixels) =
-                        crate::shell::taskbar_preview(&groups, style, light, scale)?;
+                        crate::shell::taskbar_preview(&groups, look, light, scale)?;
                     let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
                     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
                 })
