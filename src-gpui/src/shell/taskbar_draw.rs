@@ -460,9 +460,7 @@ fn labels(
             .enumerate()
             .map(|(row, (cell, _))| {
                 let before = match row {
-                    0 if rows == 1 && index > 0 => {
-                        columns[index - 1].last().map(|(cell, _)| *cell)
-                    }
+                    0 if rows == 1 && index > 0 => columns[index - 1].last().map(|(cell, _)| *cell),
                     0 => None,
                     row => Some(column[row - 1].0),
                 };
@@ -1785,8 +1783,10 @@ mod tests {
             None,
         );
         let medium_tiles = lay_out(&groups, 48, 1., look(Style::Curves), &Even, None);
-        assert!(tiles.tiles[0].rect[3] - tiles.tiles[0].rect[1]
-            > medium_tiles.tiles[0].rect[3] - medium_tiles.tiles[0].rect[1]);
+        assert!(
+            tiles.tiles[0].rect[3] - tiles.tiles[0].rect[1]
+                > medium_tiles.tiles[0].rect[3] - medium_tiles.tiles[0].rect[1]
+        );
     }
 
     #[test]
@@ -1825,7 +1825,14 @@ mod tests {
 
     #[test]
     fn figures_set_a_large_figure_under_a_name_in_its_colour() {
-        let layout = lay_out(&[single("CPU", "41%")], 48, 1., look(Style::Figures), &Even, None);
+        let layout = lay_out(
+            &[single("CPU", "41%")],
+            48,
+            1.,
+            look(Style::Figures),
+            &Even,
+            None,
+        );
         let name = &layout.runs[0];
         assert_eq!((name.size, name.baseline), (12, 24 - 5));
         assert_eq!(name.paint, Paint::Tone(Tone::Cpu));
@@ -1853,7 +1860,14 @@ mod tests {
         // padding 8.
         assert_eq!(held.width, 8 + 30 + 9 + 30 + 8);
         // A taskbar too low for two rows shows labels instead.
-        let low = lay_out(&[single("CPU", "41%")], 30, 1., look(Style::Figures), &Even, None);
+        let low = lay_out(
+            &[single("CPU", "41%")],
+            30,
+            1.,
+            look(Style::Figures),
+            &Even,
+            None,
+        );
         assert!(low.runs.iter().all(|run| run.size == 13));
     }
 
@@ -1974,7 +1988,14 @@ mod tests {
                 Some((&mut reserve, start)),
             );
             let both = [share.clone(), used.clone()];
-            let after = lay_out(&both, 48, 1., look(style), &Even, Some((&mut reserve, later)));
+            let after = lay_out(
+                &both,
+                48,
+                1.,
+                look(style),
+                &Even,
+                Some((&mut reserve, later)),
+            );
             let fresh = lay_out(
                 &both,
                 48,

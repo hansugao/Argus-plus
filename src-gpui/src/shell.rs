@@ -839,13 +839,7 @@ pub fn apply_taskbar_monitor(app: &Host, monitor: &TaskbarMonitor) {
         return;
     };
     let test = std::env::args().any(|arg| arg == "--test");
-    match taskbar::Monitor::spawn(
-        main,
-        monitor.place,
-        look,
-        monitor.display.clone(),
-        test,
-    ) {
+    match taskbar::Monitor::spawn(main, monitor.place, look, monitor.display.clone(), test) {
         Ok(started) => *running = Some(started),
         Err(error) => argus_core::diagnostics::warn(
             "taskbar monitor creation",

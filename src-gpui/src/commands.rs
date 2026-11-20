@@ -23,8 +23,7 @@ use crate::sampler::Control;
 use crate::settings::{
     BACKGROUND_INTERVALS, DeskGrouping, DeskLayout, DeskStyle, Language, MONITOR_OPACITIES, Metric,
     Reading, SettingsStore, SettingsView, TaskbarPlace, TaskbarSize, TaskbarStyle, Theme, TrayIcon,
-    TrayMenu,
-    UpdateChannel, UpdateRoute,
+    TrayMenu, UpdateChannel, UpdateRoute,
 };
 use crate::updater::{self, UpdateStatus};
 use crate::{AppState, HistoryDir, shell};

@@ -567,7 +567,7 @@ impl From<String> for TaskbarSize {
     fn from(name: String) -> Self {
         match name.as_str() {
             "small" => TaskbarSize::Small,
-            "medium" => TaskbarSize::Medium,
+            "large" => TaskbarSize::Large,
             _ => TaskbarSize::default(),
         }
     }
