@@ -820,7 +820,9 @@ pub fn taskbar_preview(
             *painter = taskbar_draw::Painter::new(font);
         }
         let painter = painter.as_ref()?;
-        let height = (40. * scale).round() as i32;
+        // As tall as the taskbar's band would be at this text size, so the
+        // preview shows the same rows as the taskbar itself.
+        let height = (40. * scale * look.size.factor()).round() as i32;
         let layout = taskbar_draw::lay_out(groups, height, scale, look, painter, None);
         let mut pixels = painter.paint(&layout, light, scale)?;
         let [red, green, blue, _] = taskbar_color(light).to_le_bytes();

@@ -192,7 +192,7 @@
     },
     "size": {
       "title": "Textgröße",
-      "desc": "Textgröße im Beschriftungsstil; eine niedrige Taskleiste zeigt eine Zeile.",
+      "desc": "Größe von Text und Werten auf der Taskleiste für alle Stile; Kurvenkacheln, Kapseln und Zahlen wachsen mit. Eine niedrige Taskleiste setzt Beschriftungen in eine Zeile.",
       "small": "Klein",
       "medium": "Mittel",
       "large": "Groß"

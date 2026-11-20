@@ -448,8 +448,8 @@ impl From<TaskbarStyle> for String {
 #[serde(from = "String", into = "String")]
 pub enum TaskbarSize {
     Small,
-    #[default]
     Medium,
+    #[default]
     Large,
 }
 
@@ -459,7 +459,7 @@ impl TaskbarSize {
         match self {
             TaskbarSize::Small => 0.85,
             TaskbarSize::Medium => 1.,
-            TaskbarSize::Large => 1.15,
+            TaskbarSize::Large => 1.25,
         }
     }
 }
@@ -468,8 +468,8 @@ impl From<String> for TaskbarSize {
     fn from(name: String) -> Self {
         match name.as_str() {
             "small" => TaskbarSize::Small,
-            "large" => TaskbarSize::Large,
-            _ => TaskbarSize::Medium,
+            "medium" => TaskbarSize::Medium,
+            _ => TaskbarSize::default(),
         }
     }
 }
@@ -495,9 +495,10 @@ pub struct TaskbarMonitor {
     pub metrics: Vec<Reading>,
     pub place: TaskbarPlace,
     pub style: TaskbarStyle,
-    /// The labels' text size; the other styles keep their own.
+    /// The text's size, for every style.
     pub size: TaskbarSize,
-    /// One row of labels or two; other styles need two rows and ignore it.
+    /// One row of labels or two; the other styles need two rows and ignore
+    /// it.
     pub rows: u8,
     /// Values in their reading's colour rather than the taskbar's own, in
     /// the labels style; the other styles colour their values anyway.
@@ -927,7 +928,7 @@ mod tests {
         assert_eq!(newer.taskbar_monitor.place, TaskbarPlace::Tray);
         assert_eq!(newer.taskbar_monitor.style, TaskbarStyle::Labels);
         // Settings without the later appearance fields show the defaults.
-        assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Medium);
+        assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Large);
         assert_eq!(newer.taskbar_monitor.rows, 2);
         assert!(newer.taskbar_monitor.colored);
         let styled: Settings =
@@ -942,7 +943,7 @@ mod tests {
         assert!(!sized.taskbar_monitor.colored);
         let unnamed: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"size": "huge"}}"#).unwrap();
-        assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Medium);
+        assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Large);
         let capsules: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "capsules"}}"#).unwrap();
         assert_eq!(capsules.taskbar_monitor.style, TaskbarStyle::Capsules);

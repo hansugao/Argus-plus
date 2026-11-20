@@ -192,7 +192,7 @@
     },
     "size": {
       "title": "Tamaño del texto",
-      "desc": "Tamaño del texto del estilo de etiquetas; una barra baja lo deja en una fila.",
+      "desc": "Tamaño del texto y de los valores en la barra de tareas, para todos los estilos; las tarjetas de curva, cápsulas y cifras crecen con él. Una barra baja pone las etiquetas en una fila.",
       "small": "Pequeño",
       "medium": "Mediano",
       "large": "Grande"

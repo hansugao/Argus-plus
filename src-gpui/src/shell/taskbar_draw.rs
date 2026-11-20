@@ -169,9 +169,9 @@ pub(crate) struct Layout {
     pub font: i32,
 }
 
-/// How the monitor shows its readings: the style, and the labels' own
-/// choices (the text's size, one row or two, values in their readings'
-/// colours). The other styles keep their own text sizes and colours.
+/// How the monitor shows its readings: the style, the text's size, and the
+/// labels' own choices (one row or two, values in their readings' colours).
+/// The tile and figure styles scale their heights with the size too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
     pub style: Style,
@@ -193,12 +193,10 @@ impl Default for Look {
     }
 }
 
-/// The labels' text size at `scale` and a size setting, pixels: the
-/// interface's own (`resources/theme.json` `fontSize`), times the size's
-/// factor. The labels take one row when two no longer fit, so the larger
-/// sizes stay inside a 48 px taskbar; at the clock's 12 px the readings were
-/// harder to make out. The tile, capsule and figure styles keep their own
-/// sizes: their fills leave no room to grow.
+/// The text size at `scale` and a size setting, pixels: the interface's own
+/// (`resources/theme.json` `fontSize`), times the size's factor. For labels
+/// the larger sizes stay inside a 48 px taskbar by taking one row when two no
+/// longer fit; at the clock's 12 px the readings were harder to make out.
 pub(crate) fn font_size(scale: f32, size: TaskbarSize) -> i32 {
     (13. * scale * size.factor()).round().max(8.) as i32
 }
@@ -350,9 +348,9 @@ pub(crate) fn lay_out(
     };
     layout.width = match style {
         Style::Labels => labels(&mut layout, groups, scale, look, fonts),
-        Style::Curves => curves(&mut layout, groups, scale, fonts),
-        Style::Capsules => capsules(&mut layout, groups, scale, fonts, reserve),
-        Style::Figures => figures(&mut layout, groups, scale, fonts),
+        Style::Curves => curves(&mut layout, groups, scale, look, fonts),
+        Style::Capsules => capsules(&mut layout, groups, scale, look, fonts, reserve),
+        Style::Figures => figures(&mut layout, groups, scale, look, fonts),
     };
     layout
 }
@@ -441,10 +439,17 @@ fn labels(
 
 /// Curves: a tile per reading, its name and value over its recent curve; a
 /// pair of rates in two rows over theirs. The layout's width.
-fn curves(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts) -> i32 {
+fn curves(
+    layout: &mut Layout,
+    groups: &[Group],
+    scale: f32,
+    look: Look,
+    fonts: &impl Fonts,
+) -> i32 {
     let px = |logical: f32| (logical * scale).round() as i32;
-    let (small, body) = (px(11.), px(12.));
-    let tall = px(38.).min(layout.height);
+    let tx = |logical: f32| (logical * scale * look.size.factor()).round().max(1.) as i32;
+    let (small, body) = (tx(11.), tx(12.));
+    let tall = tx(38.).min(layout.height);
     let top = (layout.height - tall) / 2;
     let bottom = top + tall;
     let (pad, inside, gap) = (px(8.), px(8.), px(6.));
@@ -468,8 +473,8 @@ fn curves(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts)
                     body,
                     small,
                 ));
-                let width = inside + name + px(8.) + room + inside;
-                let baseline = top + px(13.);
+                let width = inside + name + tx(8.) + room + inside;
+                let baseline = top + tx(13.);
                 layout.runs.push(Run {
                     text: cell.label.clone(),
                     x: x + inside,
@@ -489,7 +494,7 @@ fn curves(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts)
                     small,
                     value_paint(cell),
                 );
-                (width, top + px(18.))
+                (width, top + tx(18.))
             }
             cells => {
                 let marks = cells
@@ -511,7 +516,7 @@ fn curves(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts)
                     .unwrap_or(0);
                 let width = inside + marks + px(6.) + room + inside;
                 for (row, cell) in cells.iter().take(2).enumerate() {
-                    let baseline = top + [px(11.), px(23.)][row];
+                    let baseline = top + [tx(11.), tx(23.)][row];
                     layout.runs.push(Run {
                         text: cell.label.clone(),
                         x: x + inside,
@@ -532,7 +537,7 @@ fn curves(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts)
                         value_paint(cell),
                     );
                 }
-                (width, top + px(26.))
+                (width, top + tx(26.))
             }
         };
         layout.tiles.push(Tile {
@@ -554,15 +559,17 @@ fn capsules(
     layout: &mut Layout,
     groups: &[Group],
     scale: f32,
+    look: Look,
     fonts: &impl Fonts,
     mut reserve: Option<(&mut Reserve, Instant)>,
 ) -> i32 {
     let px = |logical: f32| (logical * scale).round() as i32;
-    let (name_size, value_size, unit) = (px(11.), px(12.), px(10.));
-    let tall = px(24.).min(layout.height - px(4.));
+    let tx = |logical: f32| (logical * scale * look.size.factor()).round().max(1.) as i32;
+    let (name_size, value_size, unit) = (tx(11.), tx(12.), tx(10.));
+    let tall = tx(24.).min(layout.height - px(4.));
     let y = (layout.height - tall) / 2;
     let baseline = y + ((tall as f32 + fonts.cap(value_size)) / 2.).round() as i32;
-    let (pad, inside, dot, gap) = (px(8.), px(7.), px(6.), px(4.));
+    let (pad, inside, dot, gap) = (px(8.), tx(7.), tx(6.), tx(4.));
     let mut room = |key: String, cell: &Cell| {
         let width = figure_width(fonts, &cell.value, value_size, unit);
         match reserve.as_mut() {
@@ -584,7 +591,7 @@ fn capsules(
         let dot_at = match group.cells.as_slice() {
             [cell] => {
                 let centre = [x as f32 + dot as f32 / 2., y as f32 + tall as f32 / 2.];
-                x += dot + px(4.);
+                x += dot + tx(4.);
                 layout.runs.push(Run {
                     text: cell.label.clone(),
                     x,
@@ -594,7 +601,7 @@ fn capsules(
                     paint: Paint::Ink,
                     shade: Shade::Name,
                 });
-                x += fonts.width(&cell.label, name_size, false) + px(4.);
+                x += fonts.width(&cell.label, name_size, false) + tx(4.);
                 // The value right after its name, as rates follow their
                 // arrows: room held for a wider one lies after it.
                 figure_from(
@@ -613,7 +620,7 @@ fn capsules(
             cells => {
                 for (row, cell) in cells.iter().enumerate() {
                     if row > 0 {
-                        x += px(7.);
+                        x += tx(7.);
                     }
                     layout.runs.push(Run {
                         text: cell.label.clone(),
@@ -624,7 +631,7 @@ fn capsules(
                         paint: Paint::Tone(group.tone),
                         shade: Shade::Full,
                     });
-                    x += fonts.width(&cell.label, name_size, true) + px(3.);
+                    x += fonts.width(&cell.label, name_size, true) + tx(3.);
                     // The rate right after its arrow; room for a wider one
                     // follows it, so the next arrow keeps its place.
                     figure_from(
@@ -659,9 +666,16 @@ fn capsules(
 /// Figures: a small name in its device's colour over a large figure, both
 /// from the column's left edge; a pair of rates in two rows. The layout's
 /// width.
-fn figures(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts) -> i32 {
+fn figures(
+    layout: &mut Layout,
+    groups: &[Group],
+    scale: f32,
+    look: Look,
+    fonts: &impl Fonts,
+) -> i32 {
     let px = |logical: f32| (logical * scale).round() as i32;
-    let (name_size, large, unit, body) = (px(10.), px(16.), px(10.), px(11.));
+    let tx = |logical: f32| (logical * scale * look.size.factor()).round().max(1.) as i32;
+    let (name_size, large, unit, body) = (tx(10.), tx(16.), tx(10.), tx(11.));
     let middle = layout.height / 2;
     let (pad, gap) = (px(8.), px(8.));
     let mut x = pad;
@@ -683,7 +697,7 @@ fn figures(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts
                 layout.runs.push(Run {
                     text: cell.label.clone(),
                     x,
-                    baseline: middle - px(7.),
+                    baseline: middle - tx(7.),
                     size: name_size,
                     value: false,
                     paint: if cell.high {
@@ -700,7 +714,7 @@ fn figures(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts
                     fonts,
                     &cell.value,
                     x,
-                    middle + px(13.),
+                    middle + tx(13.),
                     large,
                     unit,
                     value_paint(cell),
@@ -727,7 +741,7 @@ fn figures(layout: &mut Layout, groups: &[Group], scale: f32, fonts: &impl Fonts
                     .unwrap_or(0);
                 let width = marks + px(4.) + room;
                 for (row, cell) in cells.iter().take(2).enumerate() {
-                    let baseline = middle + [-px(4.), px(13.)][row];
+                    let baseline = middle + [-tx(4.), tx(13.)][row];
                     layout.runs.push(Run {
                         text: cell.label.clone(),
                         x,
@@ -1438,6 +1452,9 @@ mod tests {
     fn look(style: Style) -> Look {
         Look {
             style,
+            // The layout numbers below are for the middle size; the shipped
+            // default is a step larger.
+            size: TaskbarSize::Medium,
             ..Look::default()
         }
     }

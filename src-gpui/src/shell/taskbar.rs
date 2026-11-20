@@ -676,7 +676,7 @@ impl Worker {
             Some(x) => x,
             None => place(&geometry, layout.width, state.place),
         };
-        let placed = (x, 0, layout.width, height);
+        let placed = (x, 0, layout.width, layout.height);
         let on_top = unsafe { GetWindow(host, GW_CHILD) }.ok() == Some(window);
         if self.placed != Some(placed) || !on_top {
             unsafe {
@@ -686,7 +686,7 @@ impl Worker {
                     x,
                     0,
                     layout.width,
-                    height,
+                    layout.height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
             }

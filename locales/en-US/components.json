@@ -192,7 +192,7 @@
     },
     "size": {
       "title": "Text size",
-      "desc": "The text size in the labels style; a low taskbar keeps it to one row.",
+      "desc": "The size of the text and readings on the taskbar, for every style; curve tiles, capsules and figures grow with it. A low taskbar sets labels on one row.",
       "small": "Small",
       "medium": "Medium",
       "large": "Large"

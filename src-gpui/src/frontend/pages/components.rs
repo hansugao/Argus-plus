@@ -896,6 +896,21 @@ impl Desktop {
                 .collect(),
             cx,
         );
+        let size = self.segments(
+            "setting-taskbarSize",
+            ["small", "medium", "large"]
+                .iter()
+                .map(|value| {
+                    (
+                        label(&format!("components.taskbar.size.{value}")),
+                        None,
+                        Action::Invoke(command.into(), json!({ "size": value })),
+                        String::from(monitor.size) == *value,
+                    )
+                })
+                .collect(),
+            cx,
+        );
         let mut cards = vec![
             self.setting_text(
                 "taskbarMonitor",
@@ -918,33 +933,17 @@ impl Desktop {
                 "components.taskbar.style.desc",
                 vec![style],
             ),
-        ];
-        // The text's size, one row or two, and the values' colours, are the
-        // labels style's own: the other styles have no room to grow their
-        // text, need two rows and colour their values.
-        if labels {
-            let size = self.segments(
-                "setting-taskbarSize",
-                ["small", "medium", "large"]
-                    .iter()
-                    .map(|value| {
-                        (
-                            label(&format!("components.taskbar.size.{value}")),
-                            None,
-                            Action::Invoke(command.into(), json!({ "size": value })),
-                            String::from(monitor.size) == *value,
-                        )
-                    })
-                    .collect(),
-                cx,
-            );
-            cards.push(self.setting_text(
+            self.setting_text(
                 "taskbarSize",
                 "FontSizeIcon",
                 "components.taskbar.size.title",
                 "components.taskbar.size.desc",
                 vec![size],
-            ));
+            ),
+        ];
+        // One row or two, and the values' colours, are the labels style's
+        // own: the other styles need two rows and colour their values.
+        if labels {
             cards.push(self.setting_text(
                 "taskbarRows",
                 "ColumnsIcon",

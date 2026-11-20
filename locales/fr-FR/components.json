@@ -192,7 +192,7 @@
     },
     "size": {
       "title": "Taille du texte",
-      "desc": "Taille du texte du style étiquettes ; une barre basse le réduit à une ligne.",
+      "desc": "Taille du texte et des valeurs sur la barre des tâches, pour tous les styles ; les tuiles de courbe, capsules et chiffres grandissent avec. Une barre basse met les étiquettes sur une ligne.",
       "small": "Petite",
       "medium": "Moyenne",
       "large": "Grande"
