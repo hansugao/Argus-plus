@@ -91,8 +91,20 @@ function vendored() {
   });
 }
 
-function render(rust, native) {
-  const all = [...rust, ...native];
+/** Pictures bundled into argus.exe, with the license that covers them. */
+function bundled() {
+  return [join(root, "resources/tray/runner")].map((dir) => {
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    for (const [name, hash] of Object.entries(manifest.sha256)) {
+      const actual = createHash("sha256").update(readFileSync(join(dir, name))).digest("hex");
+      if (actual !== hash) fail(`内置素材校验失败：${name}`);
+    }
+    return { ...manifest, texts: [manifest.copyright, ...licenseTexts(dir)] };
+  });
+}
+
+function render(rust, native, assets) {
+  const all = [...rust, ...native, ...assets];
   const byName = (a, b) => a.name.localeCompare(b.name, "en") || a.version.localeCompare(b.version, "en");
   const line = (p) => `  ${p.name} ${p.version}（${p.license}）${p.url}`;
   const rule = "=".repeat(80);
@@ -112,6 +124,9 @@ function render(rust, native) {
     "",
     `内核传感器模块（${native.length} 个组件）`,
     ...native.sort(byName).map(line),
+    "",
+    `内置素材（${assets.length} 个组件）`,
+    ...assets.sort(byName).map(line),
   ];
 
   // Most texts are the same license with a different copyright line. Each
@@ -159,7 +174,7 @@ function render(rust, native) {
   return `${out.join("\n")}\n`;
 }
 
-const text = render(crates(), [...vendored(),{name:"Native installer templates (Tauri-derived)",version:"2.12.3",license:"MIT OR Apache-2.0",url:"https://github.com/tauri-apps/tauri",texts:[readFileSync(join(root,"packaging/windows/LICENSE-TAURI-MIT"),"utf8"),readFileSync(join(root,"packaging/windows/LICENSE-TAURI-APACHE"),"utf8")]}]);
+const text = render(crates(), [...vendored(),{name:"Native installer templates (Tauri-derived)",version:"2.12.3",license:"MIT OR Apache-2.0",url:"https://github.com/tauri-apps/tauri",texts:[readFileSync(join(root,"packaging/windows/LICENSE-TAURI-MIT"),"utf8"),readFileSync(join(root,"packaging/windows/LICENSE-TAURI-APACHE"),"utf8")]}], bundled());
 const path = join(root, OUT);
 if (process.argv.includes("--check")) {
   if (!existsSync(path) || readFileSync(path, "utf8") !== text) {
