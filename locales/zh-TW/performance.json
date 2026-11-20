@@ -27,6 +27,16 @@
       "e": "效率核心",
       "lp": "低功耗效率核心"
     },
+    "view": {
+      "overall": "整體檢視",
+      "logical": "多核心檢視"
+    },
+    "filter": {
+      "all": "全部核心",
+      "p": "僅效能核心",
+      "e": "僅效率核心",
+      "lp": "僅低功耗效率核心"
+    },
     "filterAll": "全部",
     "filterTitle": {
       "all": "顯示所有邏輯處理器",
@@ -263,6 +273,7 @@
     "sub": "{used} / {total} GB（{percent}%）",
     "usage": "記憶體使用量",
     "legendInUse": "使用中 {value}",
+    "legendCompressed": "已壓縮 {value}",
     "legendModified": "已修改 {value}",
     "legendStandby": "待命 {value}",
     "legendFree": "空閒 {value}",
@@ -270,7 +281,10 @@
     "modifiedDescription": "內容必須先寫入磁碟才能用於其他用途的記憶體",
     "standbyDescription": "包含未頻繁使用的快取資料和程式碼的記憶體",
     "freeDescription": "目前未使用，但會在處理程序、驅動程式或作業系統需要更多記憶體時優先重新使用的記憶體",
+    "compressedDescription": "以壓縮形式保存處理程序頁面的記憶體，屬於使用中的記憶體",
+    "compressedSaving": "壓縮記憶體估計儲存了 {stored} 的資料，為系統節省了 {saved} 記憶體",
     "inUse": "使用中",
+    "inUseCompressed": "使用中（已壓縮）",
     "available": "可用",
     "committed": "已認可",
     "cached": "已快取",
@@ -309,6 +323,12 @@
     "readAt": "讀取於 {time}",
     "loading": "正在讀取磁碟資訊…",
     "unavailable": "暫無磁碟詳細資料。",
+    "held": {
+      "title": "已暫停自動讀取",
+      "reason": "上次讀取磁碟詳細資料後，Argus 未正常結束，可能發生了系統當機、斷電或處理程序遭強制結束。為避免問題在每次啟動時重現，開啟此頁時不再自動讀取。",
+      "note": "讀取會向儲存裝置驅動程式傳送唯讀查詢。讀取後 Argus 繼續正常執行一段時間，自動讀取即恢復；再次異常結束時，下次啟動仍顯示本說明。",
+      "read": "仍要讀取"
+    },
     "openFailed": "無法開啟此磁碟。",
     "errorCode": "Windows 錯誤碼 {code}",
     "health": "健康狀態",
@@ -554,6 +574,9 @@
       "rows": "清單"
     },
     "maxCoreClock": "最高核心時脈",
+    "powerState": "電源狀態",
+    "lowPower": "已休眠",
+    "lowPowerHint": "GPU 閒置，已進入低耗電狀態。讀取溫度、風扇、時脈、電壓與功耗會將其喚醒，因此暫不讀取；GPU 恢復運作後繼續顯示。",
     "powerSource": "功耗來源",
     "sources": {
       "nvml": "NVIDIA NVML · 介面卡",

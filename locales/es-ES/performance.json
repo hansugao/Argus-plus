@@ -35,6 +35,16 @@
       "e": "Núcleos E",
       "lp": "Núcleos LP E"
     },
+    "view": {
+      "overall": "Vista total",
+      "logical": "Vista multinúcleo"
+    },
+    "filter": {
+      "all": "Todos los núcleos",
+      "p": "Solo núcleos P",
+      "e": "Solo núcleos E",
+      "lp": "Solo núcleos LP E"
+    },
     "filterAll": "Todos",
     "filterTitle": {
       "all": "Mostrar todos los procesadores lógicos",
@@ -279,6 +289,7 @@
     "sub": "{used} / {total} GB ({percent} %)",
     "usage": "Uso de memoria",
     "legendInUse": "En uso {value}",
+    "legendCompressed": "Comprimida {value}",
     "legendModified": "Modificada {value}",
     "legendStandby": "En espera {value}",
     "legendFree": "Libre {value}",
@@ -286,7 +297,10 @@
     "modifiedDescription": "Memoria cuyo contenido debe escribirse en el disco antes de poder usarse para otro propósito",
     "standbyDescription": "Memoria que contiene datos almacenados en caché y código que no está en uso activo",
     "freeDescription": "Memoria que no está en uso actualmente y que se reutilizará primero cuando los procesos, los controladores o el sistema operativo necesiten más memoria",
+    "compressedDescription": "Memoria que conserva páginas de procesos en forma comprimida, incluida en la memoria en uso",
+    "compressedSaving": "La memoria comprimida almacena aproximadamente {stored} de datos, lo que ahorra {saved} de memoria al sistema",
     "inUse": "En uso",
+    "inUseCompressed": "En uso (comprimida)",
     "available": "Disponible",
     "committed": "Confirmada",
     "cached": "En caché",
@@ -328,6 +342,12 @@
     "readAt": "Lectura: {time}",
     "loading": "Leyendo información del disco…",
     "unavailable": "No hay detalles del disco.",
+    "held": {
+      "title": "Lectura automática en pausa",
+      "reason": "Argus no se cerró correctamente después de la última lectura de los detalles del disco. Es posible que Windows haya fallado, que se haya cortado la alimentación o que se haya finalizado el proceso de Argus. Para que el problema no se repita en cada inicio, esta página ya no lee automáticamente al abrirse.",
+      "note": "La lectura envía consultas de solo lectura al controlador de almacenamiento. Si Argus sigue funcionando con normalidad durante un tiempo después de una lectura, la lectura automática se reanuda. Si Argus vuelve a cerrarse de forma anómala, este aviso aparecerá en el próximo inicio.",
+      "read": "Leer de todos modos"
+    },
     "openFailed": "Este disco no se pudo abrir.",
     "errorCode": "Código de error de Windows: {code}",
     "health": "Estado",
@@ -578,6 +598,9 @@
       "rows": "Lista"
     },
     "maxCoreClock": "Frecuencia máxima del núcleo",
+    "powerState": "Estado de energía",
+    "lowPower": "En suspensión",
+    "lowPowerHint": "La GPU está inactiva y en un estado de bajo consumo. Leer la temperatura, el ventilador, la frecuencia, el voltaje y la potencia la reactivaría, por lo que no se leen. Volverán a mostrarse cuando la GPU esté en uso.",
     "powerSource": "Origen de la lectura de potencia",
     "sources": {
       "nvml": "NVIDIA NVML · placa",

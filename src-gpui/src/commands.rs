@@ -21,8 +21,10 @@ use serde::Serialize;
 use crate::hotkey::HotkeyError;
 use crate::sampler::Control;
 use crate::settings::{
-    BACKGROUND_INTERVALS, Language, MONITOR_OPACITIES, Reading, SettingsStore, SettingsView,
-    TaskbarPlace, TaskbarSize, TaskbarStyle, Theme, TrayIcon, TrayMenu, UpdateChannel, UpdateRoute,
+    BACKGROUND_INTERVALS, DeskGrouping, DeskLayout, DeskStyle, Language, MONITOR_OPACITIES, Metric,
+    Reading, SettingsStore, SettingsView, TaskbarPlace, TaskbarSize, TaskbarStyle, Theme, TrayIcon,
+    TrayMenu,
+    UpdateChannel, UpdateRoute,
 };
 use crate::updater::{self, UpdateStatus};
 use crate::{AppState, HistoryDir, shell};
@@ -161,8 +163,12 @@ pub fn process_details(pid: u32, path: Option<String>) -> ProcessDetails {
     details::query(pid, path.as_deref())
 }
 
+/// Reads a disk's details, on the caller's worker thread. The read reaches the
+/// disk's storage driver: it is made with the marker on disk (`disk_reads`),
+/// so that a read which brings the system down is not made again by itself at
+/// the next start.
 pub fn disk_details(index: u32) -> argus_core::hardware::disk_details::DiskDetails {
-    argus_service::disk_details(index)
+    crate::disk_reads::read(index, || argus_service::disk_details(index))
 }
 
 /// Runs `operation` in the privileged service when one runs for this account,
@@ -183,6 +189,7 @@ fn privileged<T>(
         Operation::Suspend { .. } => ("suspend or resume process", operation),
         Operation::ControlService { .. } => ("control Windows service", operation),
         Operation::ServiceStartType { .. } => ("set service start type", operation),
+        Operation::DeleteService { .. } => ("delete Windows service", operation),
         Operation::CloseConnection { .. } => ("close TCP connection", operation),
         _ => ("privileged operation", operation),
     };
@@ -565,12 +572,13 @@ pub fn set_tray(
     Ok(settings_view(&app))
 }
 
-/// A monitor's readings as asked for: each once, in the order given.
-fn distinct(metrics: Vec<Reading>) -> Vec<Reading> {
-    let mut kept = Vec::with_capacity(metrics.len());
-    for metric in metrics {
-        if !kept.contains(&metric) {
-            kept.push(metric);
+/// A monitor's readings or metrics as asked for: each once, in the order
+/// given.
+fn distinct<T: PartialEq>(items: Vec<T>) -> Vec<T> {
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items {
+        if !kept.contains(&item) {
+            kept.push(item);
         }
     }
     kept
@@ -584,6 +592,10 @@ pub fn set_desktop_monitor(
     app: crate::native_runtime::Host,
     enabled: Option<bool>,
     metrics: Option<Vec<Reading>>,
+    order: Option<Vec<Metric>>,
+    layout: Option<DeskLayout>,
+    style: Option<DeskStyle>,
+    grouping: Option<DeskGrouping>,
     topmost: Option<bool>,
     locked: Option<bool>,
     click_through: Option<bool>,
@@ -601,6 +613,18 @@ pub fn set_desktop_monitor(
             }
             if let Some(metrics) = metrics {
                 monitor.metrics = distinct(metrics);
+            }
+            if let Some(order) = order {
+                monitor.order = distinct(order);
+            }
+            if let Some(layout) = layout {
+                monitor.layout = layout;
+            }
+            if let Some(style) = style {
+                monitor.style = style;
+            }
+            if let Some(grouping) = grouping {
+                monitor.grouping = grouping;
             }
             if let Some(topmost) = topmost {
                 monitor.topmost = topmost;
@@ -629,11 +653,13 @@ pub fn set_taskbar_monitor(
     app: crate::native_runtime::Host,
     enabled: Option<bool>,
     metrics: Option<Vec<Reading>>,
+    order: Option<Vec<Metric>>,
     place: Option<TaskbarPlace>,
     style: Option<TaskbarStyle>,
     size: Option<TaskbarSize>,
     rows: Option<u8>,
     colored: Option<bool>,
+    display: Option<String>,
 ) -> Result<SettingsView, String> {
     let saved = app
         .state::<SettingsStore>()
@@ -644,6 +670,9 @@ pub fn set_taskbar_monitor(
             }
             if let Some(metrics) = metrics {
                 monitor.metrics = distinct(metrics);
+            }
+            if let Some(order) = order {
+                monitor.order = distinct(order);
             }
             if let Some(place) = place {
                 monitor.place = place;
@@ -659,6 +688,9 @@ pub fn set_taskbar_monitor(
             }
             if let Some(colored) = colored {
                 monitor.colored = colored;
+            }
+            if let Some(display) = display {
+                monitor.display = display;
             }
         })
         .map_err(|e| e.to_string())?;
@@ -771,19 +803,47 @@ pub fn history_series(
     to: i64,
     buckets: usize,
 ) -> Vec<HistoryPoint> {
-    history::series(&dir.0, from, to, buckets.min(4096))
+    history::legacy_series(&dir.0, from, to, buckets.min(4096))
 }
 
+pub fn history_points(
+    dir: State<'_, HistoryDir>,
+    from: i64,
+    to: i64,
+    bucket: i64,
+    origin: i64,
+    keys: Vec<String>,
+) -> history::HistorySeries {
+    history::series(&dir.0, from, to, bucket, origin, &keys)
+}
+pub fn history_channels(
+    dir: State<'_, HistoryDir>,
+    from: i64,
+    to: i64,
+) -> Vec<history::HistoryChannel> {
+    history::channels(&dir.0, from, to)
+}
+pub fn history_frame(dir: State<'_, HistoryDir>, ts: i64) -> Option<history::HistoryFrame> {
+    history::frame(&dir.0, ts)
+}
+pub fn history_table(
+    dir: State<'_, HistoryDir>,
+    from: i64,
+    to: i64,
+    trend: String,
+    points: usize,
+) -> Result<history::HistoryTable, String> {
+    if points > 4096 || !matches!(trend.as_str(), "cpu" | "mem" | "disk" | "net" | "gpu") {
+        return Err(tr!("app.invalidRequest"));
+    }
+    Ok(history::table(&dir.0, from, to, &trend, points))
+}
 pub fn history_moment(dir: State<'_, HistoryDir>, ts: i64) -> Option<HistoryMoment> {
     history::moment(&dir.0, ts)
 }
 
 pub fn history_usage(dir: State<'_, HistoryDir>) -> HistoryUsage {
-    let mut usage = history::usage(&dir.0);
-    usage.bytes = usage
-        .bytes
-        .saturating_add(argus_core::watch::WatchRecorder::storage_bytes(&dir.0));
-    usage
+    history::usage(&dir.0)
 }
 
 /// Explicit observation runs on the sampler, where its file and instance handle live.
@@ -822,9 +882,9 @@ pub fn set_history_enabled(
     app.state::<SettingsStore>()
         .update(|s| s.history = enabled)
         .map_err(|e| e.to_string())?;
-    state
-        .sampler
-        .send(Control::SetHistoryDir(enabled.then(|| dir.0.clone())));
+    state.sampler.send(Control::SetHistoryDir(
+        (enabled && dir.1).then(|| dir.0.clone()),
+    ));
     Ok(settings_view(&app))
 }
 
@@ -1100,6 +1160,39 @@ pub fn set_service_start_type(
     )
 }
 
+/// What deleting a service came to: gone, or `pending` until it has
+/// stopped and every handle to it is closed.
+#[derive(Debug, Serialize)]
+pub struct ServiceDeletion {
+    pub pending: bool,
+}
+
+pub fn delete_service(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<ServiceDeletion, ActionError> {
+    // The privileged service refuses its own deletion; so does Argus with
+    // its own rights.
+    let result = if argus_service::is_own_service(&name) {
+        action_result("delete Windows service", "local", Err(ActionError::Refused))
+    } else {
+        privileged(
+            &state,
+            Operation::DeleteService { name: name.clone() },
+            |reply| {
+                done(reply)?;
+                state.services.invalidate(&name);
+                Some(())
+            },
+            || state.services.delete(&name),
+        )
+    };
+    state.sampler.send(Control::Refresh);
+    result.map(|()| ServiceDeletion {
+        pending: argus_core::services::remains(&name),
+    })
+}
+
 /// Opens the Windows Services console, for what Argus does not cover.
 pub fn open_services_console() -> Result<(), String> {
     std::process::Command::new("mmc.exe")
@@ -1125,6 +1218,10 @@ pub fn set_startup_enabled(id: String, enabled: bool) -> Result<(), ActionError>
         "local",
         startup::set_enabled(&id, enabled),
     )
+}
+
+pub fn delete_startup_item(id: String) -> Result<(), ActionError> {
+    action_result("delete startup item", "local", startup::delete(&id))
 }
 
 // ---- Connections ----------------------------------------------------------------
@@ -1189,8 +1286,113 @@ pub fn pick_path(
 mod tests {
     use super::*;
 
+    #[test]
+    fn history_dispatch_serves_both_page_contracts() {
+        use crate::{dispatch::invoke, native_runtime::Host};
+        use serde_json::json;
+        let base = 1_800_000_000_000i64;
+        let dir =
+            std::env::temp_dir().join(format!("argus-history-dispatch-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let host = Host::new("dev.argus.taskmanager.test.history-dispatch".into());
+        host.manage(HistoryDir(dir.clone(), true));
+        let mut rec = history::HistoryRecorder::new(dir.clone());
+        for n in 0..10 {
+            rec.record(&argus_core::Snapshot {
+                seq: n as u64,
+                timestamp: base + n * 1000,
+                system: argus_core::SystemStats {
+                    cpu: 25.,
+                    ..Default::default()
+                },
+                hardware: Default::default(),
+                processes: Vec::new(),
+                sessions: Vec::new(),
+                process_network: false,
+            });
+        }
+        let live = invoke(
+            &host,
+            "history_points",
+            json!({"from":base,"to":base+9000,"bucket":1000,"origin":base,"keys":["cpu","absent"]}),
+        )
+        .unwrap();
+        assert_eq!(live["ts"].as_array().unwrap().len(), 10);
+        assert_eq!(live["series"]["cpu"]["mean"][0], 25.);
+        assert!(live["series"]["absent"]["mean"][0].is_null());
+        drop(rec);
+        let query = |name, args| invoke(&host, name, args).unwrap();
+        let interval = json!({"from":base,"to":base+10000});
+        assert_eq!(
+            query("history_range", json!({})),
+            json!([base, base + 5000])
+        );
+        assert_eq!(
+            query(
+                "history_series",
+                json!({"from":base,"to":base+10000,"buckets":2})
+            )[0]["frameTs"],
+            base
+        );
+        assert_eq!(
+            query("history_moment", json!({"ts":base}))["system"]["cpuPeak"],
+            25.
+        );
+        assert_eq!(
+            query("history_frame", json!({"ts":base}))["system"]["cpuKernel"],
+            0.
+        );
+        assert!(
+            query("history_channels", interval)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["key"] == "cpuVoltage" && v["service"] == true)
+        );
+        assert_eq!(
+            query(
+                "history_table",
+                json!({"from":base,"to":base+10000,"trend":"cpu","points":4})
+            )["recorded"],
+            10_000
+        );
+        let usage = query("history_usage", json!({}));
+        assert_eq!(usage["days"], 1);
+        assert_eq!(usage["breakdown"]["watch"], 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn denied() -> Result<(), ActionError> {
         Err(ActionError::AccessDenied)
+    }
+
+    /// A deletion that fails comes back with its cause, which the log keeps
+    /// too, with the stage that failed but not the entry's name.
+    #[test]
+    fn a_failed_deletion_is_logged_with_its_cause() {
+        argus_core::diagnostics::capture_helper_failures();
+        let name = format!("Argus missing entry {}", std::process::id());
+        let result = delete_startup_item(format!("hklmRun|{name}"));
+        let log = argus_core::diagnostics::take_helper_failures();
+        // Nothing of that name is there, so nothing is deleted either way:
+        // without administrator rights the key does not open.
+        if argus_core::privilege::is_elevated() {
+            assert!(matches!(result, Err(ActionError::NotFound)));
+        } else {
+            assert!(matches!(result, Err(ActionError::AccessDenied)));
+            assert!(
+                log.iter()
+                    .any(|line| line.contains("startup delete RegOpenKeyExW: ")
+                        && line.contains("(0x80070005)")),
+                "{log:#?}"
+            );
+        }
+        assert!(
+            log.iter()
+                .any(|line| line.contains("delete startup item: source=local; ")),
+            "{log:#?}"
+        );
+        assert!(log.iter().all(|line| !line.contains(&name)));
     }
 
     #[test]

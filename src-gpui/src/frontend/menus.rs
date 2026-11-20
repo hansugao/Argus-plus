@@ -444,6 +444,7 @@ impl Desktop {
             "submenu": popup.sub.as_ref().map(|sub| sub.owner),
             "items": popup.items.iter().map(|item| &item.label).collect::<Vec<_>>(),
             "disabled": popup.items.iter().map(|item| item.disabled).collect::<Vec<_>>(),
+            "checked": popup.items.iter().map(|item| item.checked).collect::<Vec<_>>(),
         })
     }
 
@@ -893,16 +894,19 @@ impl Desktop {
             }
             let this_entry = entry(index);
             let owner = !sub && !item.children.is_empty();
-            // `:hover`, `:focus-visible` and the item whose submenu is open.
+            // `:hover`, `:focus-visible` and the item whose submenu is open;
+            // never a disabled item, which keys pass over too.
             let lit = interactive
+                && !item.disabled
                 && (popup.hovered == Some(this_entry)
                     || (popup.focus_visible && focused(index))
                     || (owner && open_owner == Some(index)));
-            // `.danger` follows `:disabled` in the stylesheet and wins over it.
-            let color = if item.danger {
-                p.danger
-            } else if item.disabled {
+            // A disabled item looks it, a dangerous one too: in red it
+            // would look as if it could be chosen.
+            let color = if item.disabled {
                 p.faint
+            } else if item.danger {
+                p.danger
             } else {
                 p.ink
             };
@@ -1106,6 +1110,29 @@ impl Desktop {
             "startup" => {
                 let raw = &row.raw;
                 let path = raw["path"].as_str().filter(|p| !p.is_empty());
+                // Asks first. A packaged task belongs to its app, which only
+                // lets it be disabled.
+                let delete = MenuItem::new(
+                    label("common.delete"),
+                    Action::Dialog(
+                        "deleteStartup".into(),
+                        json!({
+                            "id": raw["id"],
+                            "name": text(raw, "name"),
+                            "entry": raw["entry"],
+                            "location": raw["location"],
+                        }),
+                    ),
+                )
+                .icon("TrashIcon")
+                .danger();
+                let delete = if text(raw, "location") == "package" {
+                    delete
+                        .disabled(true)
+                        .detail(label("startup.delete.disableOnly"))
+                } else {
+                    delete
+                };
                 vec![
                     MenuItem::new(
                         label(if boolean(raw, "enabled") {
@@ -1132,6 +1159,8 @@ impl Desktop {
                     )
                     .icon("CopyIcon")
                     .disabled(text(raw, "command").is_empty()),
+                    MenuItem::separator(),
+                    delete,
                     MenuItem::separator(),
                 ]
             }
@@ -1431,6 +1460,23 @@ impl Desktop {
                 Action::Copy(name.into(), "services.copied.name"),
             )
             .icon("CopyIcon"),
+            MenuItem::separator(),
+            // Asks first. Argus's own service goes with its uninstall.
+            MenuItem::new(
+                label("common.delete"),
+                Action::Dialog(
+                    "deleteService".into(),
+                    json!({
+                        "name": name,
+                        "title": text(raw, "displayName"),
+                        "path": command,
+                        "state": state,
+                    }),
+                ),
+            )
+            .icon("TrashIcon")
+            .danger()
+            .disabled(argus_service::is_own_service(name)),
             MenuItem::separator(),
         ]);
         items

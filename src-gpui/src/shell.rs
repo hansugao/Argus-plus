@@ -1,6 +1,7 @@
 //! Native window lifecycle, backdrop, tray, the taskbar monitor and
 //! visibility-driven sampling.
 pub(crate) mod desk;
+pub(crate) mod displays;
 mod taskbar;
 mod taskbar_draw;
 mod tray;
@@ -48,6 +49,73 @@ static VERSION_4: AtomicBool = AtomicBool::new(false);
 /// When the keyboard last selected the icon; the shell can report one
 /// press twice.
 static KEY_SELECT: Mutex<Option<Instant>> = Mutex::new(None);
+/// When the right button last went down on the tray icon or the taskbar
+/// monitor: the right click that follows closes a panel that was open then.
+static RIGHT_PRESS: Mutex<Option<Instant>> = Mutex::new(None);
+/// The hover card waits this long after the shell reports the pointer
+/// resting on the tray icon (`NIN_POPUPOPEN`), so that a pointer passing
+/// over the icon opens nothing.
+const CARD_DELAY_MS: u32 = 400;
+/// The main window's timer for the hover card, and where it opens.
+const CARD_TIMER: usize = 0x4152_4344;
+static CARD_DUE: Mutex<Option<Anchor>> = Mutex::new(None);
+
+/// The hover card opens beside `anchor` once the pointer has rested a
+/// little longer, unless `cancel_card` comes first.
+fn delay_card(hwnd: HWND, anchor: Anchor) {
+    *CARD_DUE.lock().unwrap() = Some(anchor);
+    unsafe {
+        SetTimer(Some(hwnd), CARD_TIMER, CARD_DELAY_MS, None);
+    }
+}
+
+/// The hover card's wait ends: it opens, unless it was cancelled meanwhile.
+fn card_due(app: &Host, hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(hwnd), CARD_TIMER);
+    }
+    if let Some(anchor) = CARD_DUE.lock().unwrap().take() {
+        let _ = app.emit(
+            "argus-tray-card",
+            serde_json::json!({ "open": true, "anchor": anchor }),
+        );
+    }
+}
+
+/// The pointer resting on the tray icon (`rest`) or leaving it, as the
+/// shell reports it, at the sample tray position (the tests' `trayHover`):
+/// the hover card waits as it does for the shell.
+pub fn tray_hover(app: &Host, rest: bool) {
+    let Some(hwnd) = app.get_window("main").and_then(|window| window.hwnd().ok()) else {
+        return;
+    };
+    if rest {
+        delay_card(hwnd, sample_anchor());
+    } else {
+        cancel_card(hwnd);
+        let _ = app.emit("argus-tray-card", serde_json::json!({ "open": false }));
+    }
+}
+
+/// The pointer left the icon, or clicked it: a card on its way stays away.
+fn cancel_card(hwnd: HWND) {
+    if CARD_DUE.lock().unwrap().take().is_some() {
+        unsafe {
+            let _ = KillTimer(Some(hwnd), CARD_TIMER);
+        }
+    }
+}
+
+/// When the right button last went down on the tray icon or the taskbar
+/// monitor.
+pub fn right_press() -> Option<Instant> {
+    *RIGHT_PRESS.lock().unwrap()
+}
+/// The right button went down on the tray icon or the taskbar monitor (the
+/// tests' `trayPress`).
+pub fn mark_right_press() {
+    *RIGHT_PRESS.lock().unwrap() = Some(Instant::now());
+}
 const TRAY_MESSAGE: u32 = WM_APP + 82;
 const BADGE_COLOR: [u8; 4] = [0x38, 0xBD, 0xF8, 0xFF];
 
@@ -764,14 +832,20 @@ pub fn apply_taskbar_monitor(app: &Host, monitor: &TaskbarMonitor) {
         colored: monitor.colored,
     };
     if let Some(running) = running.as_ref() {
-        running.look(monitor.place, look);
+        running.look(monitor.place, look, monitor.display.clone());
         return;
     }
     let Some(main) = app.get_window("main").and_then(|window| window.hwnd().ok()) else {
         return;
     };
     let test = std::env::args().any(|arg| arg == "--test");
-    match taskbar::Monitor::spawn(main, monitor.place, look, test) {
+    match taskbar::Monitor::spawn(
+        main,
+        monitor.place,
+        look,
+        monitor.display.clone(),
+        test,
+    ) {
         Ok(started) => *running = Some(started),
         Err(error) => argus_core::diagnostics::warn(
             "taskbar monitor creation",
@@ -814,17 +888,22 @@ pub fn taskbar_preview(
     thread_local! {
         static PAINTER: RefCell<Option<taskbar_draw::Painter>> = const { RefCell::new(None) };
     }
-    let font = taskbar_draw::font_size(scale, look.size);
+    let font = taskbar_draw::font_size(scale * look.size.factor());
     PAINTER.with_borrow_mut(|painter| {
         if painter.as_ref().is_none_or(|painter| painter.font != font) {
             *painter = taskbar_draw::Painter::new(font);
         }
         let painter = painter.as_ref()?;
-        // As tall as the taskbar's band would be at this text size, so the
-        // preview shows the same rows as the taskbar itself.
-        let height = (40. * scale * look.size.factor()).round() as i32;
+        // Laid out as on Windows 11's 48 px taskbar, then cut to the band
+        // where every style's readings lie: 40 px, or as much of it as the
+        // text size fills.
+        let height = (48. * scale).round() as i32;
         let layout = taskbar_draw::lay_out(groups, height, scale, look, painter, None);
-        let mut pixels = painter.paint(&layout, light, scale)?;
+        let pixels = painter.paint(&layout, light, scale)?;
+        let band = (40. * scale * look.size.factor()).round() as i32;
+        let cut = ((height - band) / 2).clamp(0, height / 2 - 1);
+        let row = layout.width as usize * 4;
+        let mut pixels = pixels[cut as usize * row..(height - cut) as usize * row].to_vec();
         let [red, green, blue, _] = taskbar_color(light).to_le_bytes();
         for pixel in pixels.as_chunks_mut::<4>().0 {
             let clear = 1. - f32::from(pixel[3]) / 255.;
@@ -833,13 +912,20 @@ pub fn taskbar_preview(
             }
             pixel[3] = 255;
         }
-        Some((layout.width as u32, layout.height as u32, pixels))
+        Some((layout.width as u32, (height - 2 * cut) as u32, pixels))
     })
 }
 /// The taskbar monitor's window on screen, physical pixels (left, top,
 /// right, bottom), while it shows.
 pub fn taskbar_monitor_rect() -> Option<[i32; 4]> {
     taskbar::shown_rect()
+}
+
+/// The display the taskbar monitor was put on (empty for the primary one)
+/// and whether the primary display's taskbar stands in for its; none while
+/// it is not shown.
+pub fn taskbar_monitor_on() -> Option<(String, bool)> {
+    taskbar::shown_on()
 }
 pub fn set_tray_tooltip(_app: &Host, text: &str) {
     if let Some(worker) = TRAY.lock().unwrap().clone() {
@@ -1223,7 +1309,7 @@ mod tray_action_tests {
     use super::{NIN_KEYSELECT, TrayAction, tray_action};
     use windows::Win32::UI::Shell::{NIN_POPUPCLOSE, NIN_POPUPOPEN};
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP,
+        WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
     };
 
     #[test]
@@ -1237,6 +1323,10 @@ mod tray_action_tests {
                 Some(TrayAction::Toggle)
             );
             assert_eq!(tray_action(WM_LBUTTONDOWN, version_4), None);
+            assert_eq!(
+                tray_action(WM_RBUTTONDOWN, version_4),
+                Some(TrayAction::Press)
+            );
             assert_eq!(tray_action(WM_MOUSEMOVE, version_4), Some(TrayAction::Warm));
         }
         assert_eq!(
@@ -1321,6 +1411,8 @@ enum TrayAction {
     KeyToggle,
     /// A right click or the menu key: the quick panel or the menu.
     Context,
+    /// The right button went down on the icon.
+    Press,
     /// The pointer rests on the icon / left it.
     CardOpen,
     CardClose,
@@ -1336,6 +1428,7 @@ fn tray_action(event: u32, version_4: bool) -> Option<TrayAction> {
         NIN_KEYSELECT => Some(TrayAction::KeyToggle),
         WM_CONTEXTMENU => Some(TrayAction::Context),
         WM_RBUTTONUP if !version_4 => Some(TrayAction::Context),
+        WM_RBUTTONDOWN => Some(TrayAction::Press),
         NIN_POPUPOPEN => Some(TrayAction::CardOpen),
         NIN_POPUPCLOSE => Some(TrayAction::CardClose),
         WM_MOUSEMOVE => Some(TrayAction::Warm),
@@ -1413,6 +1506,7 @@ fn taskbar_action(app: &Host, action: taskbar::Action) {
             }
         }
         taskbar::Action::Warm => warm_flyouts(true),
+        taskbar::Action::Press => mark_right_press(),
     }
 }
 
@@ -1556,6 +1650,7 @@ fn tray_callback(app: &Host, hwnd: HWND, w: WPARAM, l: LPARAM) {
         point
     };
     let close_card = || {
+        cancel_card(hwnd);
         let _ = app.emit("argus-tray-card", serde_json::json!({ "open": false }));
     };
     match action {
@@ -1582,14 +1677,12 @@ fn tray_callback(app: &Host, hwnd: HWND, w: WPARAM, l: LPARAM) {
         }
         TrayAction::CardOpen => {
             if app.state::<SettingsStore>().get().tray_card {
-                let _ = app.emit(
-                    "argus-tray-card",
-                    serde_json::json!({ "open": true, "anchor": tray_anchor(hwnd, point) }),
-                );
+                delay_card(hwnd, tray_anchor(hwnd, point));
             }
         }
         TrayAction::CardClose => close_card(),
         TrayAction::Warm => warm_flyouts(true),
+        TrayAction::Press => mark_right_press(),
     }
 }
 
@@ -1610,6 +1703,10 @@ unsafe extern "system" fn procedure(
         }
         if message == TRAY_MESSAGE {
             tray_callback(app, hwnd, w, l);
+            return LRESULT(0);
+        }
+        if message == WM_TIMER && w.0 == CARD_TIMER {
+            card_due(app, hwnd);
             return LRESULT(0);
         }
         if message == taskbar::MESSAGE {

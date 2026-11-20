@@ -107,8 +107,11 @@
     "history": "Cuando el gráfico histórico tiene foco",
     "time": "Seleccione el punto anterior/siguiente en el tiempo",
     "timeJump": "Retroceder / avanzar en una cantidad mayor",
-    "timeEnds": "Seleccione el punto en el tiempo más antiguo o más reciente",
-    "latest": "Borrar la selección temporal y volver a los datos más recientes"
+    "timeFirst": "Seleccionar el punto más antiguo del gráfico",
+    "latest": "Volver a las lecturas más recientes y seguir actualizando",
+    "zoom": "Ampliar / reducir el intervalo",
+    "zoomReset": "Mostrar todo el intervalo",
+    "clearCursor": "Quitar el cursor y la selección"
   },
   "hotkey": {
     "title": "Mostrar u ocultar Argus",
@@ -169,13 +172,15 @@
       "stopped": "Detenido",
       "startPending": "Iniciando",
       "stopPending": "Deteniendo",
-      "unavailable": "No disponible"
+      "unavailable": "No disponible",
+      "broken": "Dañado",
+      "deletePending": "Eliminando"
     },
     "outdated": "La versión del servicio {service} no coincide con Argus {app}. Haga clic en «Actualizar servicio».",
     "incompatible": "Haga clic en «Actualizar servicio» para instalar la versión correspondiente a Argus y establecer la conexión.",
     "install": {
       "title": "¿Habilitar el servicio privilegiado?",
-      "body": "Tras instalar el servicio, la cuenta actual de Windows podrá realizar estas operaciones sin solicitar autorización de nuevo:\n· finalizar, suspender o reanudar procesos de cualquier usuario, excepto los críticos del sistema, y establecer su prioridad, prioridad de I/O, prioridad de memoria y modo de eficiencia;\n· iniciar y detener cualquier servicio de Windows y cambiar su tipo de inicio, incluidos los servicios de software de seguridad y Windows Update;\n· cerrar cualquier conexión IPv4 TCP y consultar archivos en uso, tráfico de red y lecturas y escrituras de disco de todos los procesos;\n· consultar la identidad del disco, los atributos SMART y los registros de estado mediante comandos fijos de solo lectura;\n· leer datos de sensores de CPU y velocidades de ventiladores de la placa base mediante módulos fijos cuando PawnIO esté instalado.\n\nOtros programas con permisos estándar de esta cuenta también podrán realizar estas operaciones, lo que concede a la cuenta parte de los permisos de administrador. Instálelo únicamente en una cuenta de uso personal. El servicio se inicia con Windows. La instalación requiere autorización de administrador y el servicio puede desinstalarse después en Configuración.",
+      "body": "Tras instalar el servicio, la cuenta actual de Windows podrá realizar estas operaciones sin solicitar autorización de nuevo:\n· finalizar, suspender o reanudar procesos de cualquier usuario, excepto los críticos del sistema, y establecer su prioridad, prioridad de I/O, prioridad de memoria y modo de eficiencia;\n· iniciar, detener y eliminar cualquier servicio de Windows y cambiar su tipo de inicio, incluidos los servicios de software de seguridad y Windows Update;\n· cerrar cualquier conexión IPv4 TCP y consultar archivos en uso, tráfico de red y lecturas y escrituras de disco de todos los procesos;\n· consultar la identidad del disco, los atributos SMART y los registros de estado mediante comandos fijos de solo lectura;\n· leer datos de sensores de CPU y velocidades de ventiladores de la placa base mediante módulos fijos cuando PawnIO esté instalado.\n\nOtros programas con permisos estándar de esta cuenta también podrán realizar estas operaciones, lo que concede a la cuenta parte de los permisos de administrador. Instálelo únicamente en una cuenta de uso personal. El servicio se inicia con Windows. La instalación requiere autorización de administrador y el servicio puede desinstalarse después en Configuración.",
       "action": "Instalar y habilitar"
     },
     "uninstall": {
@@ -187,7 +192,20 @@
     "start": "Iniciar servicio",
     "update": "Actualizar servicio",
     "ready": "El servicio privilegiado está listo.",
-    "uninstalled": "El servicio privilegiado ha sido desinstalado."
+    "uninstalled": "El servicio privilegiado ha sido desinstalado.",
+    "broken": {
+      "repair": "Haga clic en «Reparar servicio» para reinstalar los archivos del servicio y restablecer la conexión, o en «Desinstalar» para eliminar el registro residual del servicio. Ambas operaciones requieren autorización de administrador.",
+      "remove": "Haga clic en «Desinstalar» para eliminar el registro residual del servicio; después podrá instalarse de nuevo. La desinstalación requiere autorización de administrador.",
+      "notice": "El servicio privilegiado está dañado y no puede iniciarse. Consulte Configuración → Permisos.",
+      "view": "Ver"
+    },
+    "deletePending": "El servicio se ha desinstalado. Windows eliminará su registro cuando los demás programas cierren sus identificadores del servicio. Cierre los programas que lo muestran, como la consola Servicios, y actualice el estado; reiniciar Windows también completa la eliminación.",
+    "repair": {
+      "title": "¿Reparar el servicio privilegiado?",
+      "body": "El registro de autorización se ha perdido, por lo que no es posible confirmar la cuenta para la que se autorizó el servicio. La reparación reinstala los archivos del servicio y lo autoriza para la cuenta de Windows actual; si la sustitución del Administrador de tareas está habilitada, primero se restaura el Administrador de tareas de Windows.",
+      "confirm": "Reparar y habilitar",
+      "action": "Reparar servicio"
+    }
   },
   "taskManager": {
     "title": "Sustituir el Administrador de tareas",

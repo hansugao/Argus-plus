@@ -33,6 +33,16 @@
       "e": "E-cores",
       "lp": "LP E-cores"
     },
+    "view": {
+      "overall": "Overall utilization",
+      "logical": "Logical processors"
+    },
+    "filter": {
+      "all": "All cores",
+      "p": "P-cores only",
+      "e": "E-cores only",
+      "lp": "LP E-cores only"
+    },
     "filterAll": "All",
     "filterTitle": {
       "all": "Show all logical processors",
@@ -275,6 +285,7 @@
     "sub": "{used} / {total} GB ({percent}%)",
     "usage": "Memory usage",
     "legendInUse": "In use {value}",
+    "legendCompressed": "Compressed {value}",
     "legendModified": "Modified {value}",
     "legendStandby": "Standby {value}",
     "legendFree": "Free {value}",
@@ -282,7 +293,10 @@
     "modifiedDescription": "Memory whose contents must be written to disk before it can be used for another purpose",
     "standbyDescription": "Memory that contains cached data and code that is not actively in use",
     "freeDescription": "Memory that is not currently in use, and that will be repurposed first when processes, drivers, or the operating system need more memory",
+    "compressedDescription": "Memory that holds process pages in compressed form, counted as in use",
+    "compressedSaving": "Compressed memory stores an estimated {stored} of data, saving the system {saved} of memory",
     "inUse": "In use",
+    "inUseCompressed": "In use (Compressed)",
     "available": "Available",
     "committed": "Committed",
     "cached": "Cached",
@@ -321,6 +335,12 @@
     "readAt": "Read at {time}",
     "loading": "Reading disk information…",
     "unavailable": "No disk details.",
+    "held": {
+      "title": "Automatic reading paused",
+      "reason": "Argus did not exit normally after it last read disk details. Windows may have crashed, the power may have failed, or the Argus process may have been ended. This page no longer reads when it opens, so that the problem does not repeat at every start.",
+      "note": "Reading sends read-only queries to the storage driver. Automatic reading resumes after Argus has kept running normally for a while after a read. If Argus ends abnormally again, this notice appears at the next start.",
+      "read": "Read anyway"
+    },
     "performanceUnavailable": "Disk performance counters are temporarily unavailable.",
     "volumeCounters": "Performance statistics come from volume {volumes} and cover that volume.",
     "volumeCountersMultiple": "Read/write rates and response time are aggregated from volumes {volumes}; active time is unavailable.",
@@ -569,6 +589,9 @@
       "rows": "List"
     },
     "maxCoreClock": "Max core clock",
+    "powerState": "Power state",
+    "lowPower": "Sleeping",
+    "lowPowerHint": "The GPU is idle and in a low-power state. Reading its temperature, fan, clock, voltage and power would wake it, so they are not read. They are shown again when the GPU is in use.",
     "powerSource": "Power source",
     "sources": {
       "nvml": "NVIDIA NVML · board",

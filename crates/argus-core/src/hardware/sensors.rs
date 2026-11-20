@@ -1,13 +1,12 @@
-//! Readings Windows publishes as performance counters, collected in one PDH
-//! query per sample: CPU clock (overall and per logical processor), ACPI
-//! thermal zones, and RAPL power meters. None of them needs a driver or
-//! administrator rights; counters a machine lacks are simply absent.
+//! Windows CPU clocks from PCW, plus PDH thermal, power and idle readings.
 
 use serde::Serialize;
+use std::cell::OnceCell;
+use std::sync::Arc;
 use windows::Win32::System::Performance::PDH_HCOUNTER;
 use windows::core::w;
 
-use super::{CpuInfo, CpuThread};
+use super::{CpuInfo, clock};
 use crate::pdh::{self, Query};
 use crate::util::AlignedBuf;
 
@@ -74,13 +73,14 @@ pub struct SensorSample {
 }
 
 pub(crate) struct Sensors {
-    query: Query,
+    raw_clocks: Option<clock::Query>,
+    query: Option<Query>,
     buf: AlignedBuf,
-    fallback_mhz: Option<u32>,
-    threads: Vec<CpuThread>,
+    nominal_mhz: OnceCell<Vec<Option<u32>>>,
+    cpu: Arc<CpuInfo>,
     /// Direct MHz readings for logical processors and their total.
     core_freq: Option<PDH_HCOUNTER>,
-    /// Nominal-scaled fallback for a single homogeneous processor package.
+    /// Performance relative to each processor's nominal frequency.
     core_perf: Option<PDH_HCOUNTER>,
     zones: Option<PDH_HCOUNTER>,
     /// Zones in tenths of a kelvin (`High Precision Temperature`) rather than kelvin.
@@ -93,13 +93,16 @@ pub(crate) struct Sensors {
 unsafe impl Send for Sensors {}
 
 impl Sensors {
-    pub fn new(cpu: &CpuInfo) -> Option<Self> {
-        let query = Query::open()?;
-        let add = |path| query.add(path);
-        let core_freq = add(w!(r"\Processor Information(*)\Actual Frequency"));
-        let fallback_mhz = performance_reference(cpu);
-        let core_perf = fallback_mhz
-            .and_then(|_| add(w!(r"\Processor Information(*)\% Processor Performance")));
+    pub fn new(cpu: Arc<CpuInfo>) -> Self {
+        let raw_clocks = clock::Query::open(&cpu);
+        let query = Query::open();
+        let add = |path| query.as_ref()?.add(path);
+        let core_freq = if raw_clocks.is_none() {
+            add(w!(r"\Processor Information(*)\Actual Frequency"))
+        } else {
+            None
+        };
+        let core_perf = add(w!(r"\Processor Information(*)\% Processor Performance"));
         let mut zones_precise = true;
         let mut zones = add(w!(
             r"\Thermal Zone Information(*)\High Precision Temperature"
@@ -115,41 +118,66 @@ impl Sensors {
             add(w!(r"\Processor Information(*)\% C3 Time")),
         ];
         // Rate counters need a first collection to have something to diff against.
-        query.collect();
-        Some(Self {
+        if let Some(query) = &query {
+            query.collect();
+        }
+        Self {
+            raw_clocks,
             query,
             buf: AlignedBuf::with_capacity(16 * 1024),
-            fallback_mhz,
-            threads: cpu.threads.clone(),
+            nominal_mhz: OnceCell::new(),
+            cpu,
             core_freq,
             core_perf,
             zones,
             zones_precise,
             energy,
             idle,
-        })
+        }
     }
 
     pub fn sample(&mut self) -> SensorSample {
         let mut out = SensorSample::default();
-        if !self.query.collect() {
+        let pdh_ready = self.query.as_ref().is_some_and(Query::collect);
+        let measured = if let Some(raw) = &mut self.raw_clocks {
+            raw.sample(&self.cpu)
+        } else {
+            let actual = self
+                .core_freq
+                .filter(|_| pdh_ready)
+                .map(|c| pdh::array_uncapped(c, &mut self.buf))
+                .unwrap_or_default();
+            pdh_clocks(&self.cpu, &actual)
+        };
+        (out.cpu_mhz, out.core_mhz) = finish_clocks(
+            &self.cpu,
+            measured,
+            || {
+                self.nominal_mhz
+                    .get_or_init(|| {
+                        super::cpu::nominal_frequencies(
+                            &self.cpu.threads,
+                            performance_reference(&self.cpu),
+                        )
+                    })
+                    .as_slice()
+            },
+            || {
+                self.core_perf
+                    .filter(|_| pdh_ready)
+                    .map(|c| pdh::array_uncapped(c, &mut self.buf))
+                    .unwrap_or_default()
+            },
+        );
+        if !pdh_ready {
             return out;
         }
-        let actual = self
-            .core_freq
-            .map(|c| pdh::array_uncapped(c, &mut self.buf))
-            .unwrap_or_default();
-        let performance = self
-            .core_perf
-            .map(|c| pdh::array_uncapped(c, &mut self.buf))
-            .unwrap_or_default();
-        (out.cpu_mhz, out.core_mhz) =
-            clocks(&self.threads, &actual, &performance, self.fallback_mhz);
-        out.idle.resize_with(self.threads.len(), CpuIdle::default);
+        out.idle
+            .resize_with(self.cpu.threads.len(), CpuIdle::default);
         for (state, counter) in self.idle.iter().enumerate() {
             let Some(counter) = counter else { continue };
             for (name, value) in pdh::array(*counter, &mut self.buf) {
-                let Some(index) = processor_index(&name, &self.threads) else {
+                let Some(index) = self.cpu.counter_index(&name) else {
                     continue;
                 };
                 if !value.is_finite() || !(0.0..=100.01).contains(&value) {
@@ -201,78 +229,149 @@ fn performance_reference(cpu: &CpuInfo) -> Option<u32> {
     .then_some(cpu.base_mhz)
 }
 
-fn valid_mhz(value: f64) -> Option<u32> {
+pub(super) fn valid_mhz(value: f64) -> Option<u32> {
     (value.is_finite() && value > 0.0 && value <= 12000.0)
         .then(|| value.round() as u32)
         .filter(|value| *value > 0)
 }
 
-fn clocks(
-    threads: &[CpuThread],
-    actual: &[(String, f64)],
-    performance: &[(String, f64)],
-    fallback_mhz: Option<u32>,
-) -> (Option<u32>, Vec<u32>) {
-    let mut cores = vec![0; threads.len()];
+/// Check a reported total against complete readings, or derive their mean.
+fn clock_total(total: Option<u32>, cores: &[u32], logical: u32) -> Option<u32> {
+    if cores.is_empty() || cores.len() != logical as usize || cores.contains(&0) {
+        return total;
+    }
+    if let Some(mhz) = total
+        && cores.iter().any(|v| *v <= mhz + 1)
+        && cores.iter().any(|v| *v >= mhz.saturating_sub(1))
+    {
+        return Some(mhz);
+    }
+    let sum: u64 = cores.iter().map(|v| u64::from(*v)).sum();
+    Some(((sum + cores.len() as u64 / 2) / cores.len() as u64) as u32)
+}
+
+fn pdh_clocks(cpu: &CpuInfo, actual: &[(String, f64)]) -> (Option<u32>, Vec<u32>) {
+    let mut cores = vec![0; cpu.threads.len()];
     let mut total = None;
     for (name, value) in actual {
         if name == "_Total" {
             total = valid_mhz(*value);
-        } else if let Some(index) = processor_index(name, threads) {
+        } else if let Some(index) = cpu.counter_index(name) {
             cores[index] = valid_mhz(*value).unwrap_or(0);
         }
     }
-    let direct_complete = !cores.is_empty() && cores.iter().all(|value| *value > 0);
-    let mut fallback_total = None;
-    if let Some(base) = fallback_mhz {
-        for (name, value) in performance {
-            let mhz = valid_mhz(f64::from(base) * value / 100.0);
-            if name == "_Total" {
-                fallback_total = mhz;
-            } else if let Some(index) = processor_index(name, threads)
-                && cores[index] == 0
-            {
-                cores[index] = mhz.unwrap_or(0);
-            }
-        }
-    }
-    let complete = !cores.is_empty() && cores.iter().all(|value| *value > 0);
-    if complete {
-        let low = cores.iter().min().copied().unwrap();
-        let high = cores.iter().max().copied().unwrap();
-        // A total cannot exceed every contributing logical processor. This
-        // also prevents a broken rollup from overriding valid MHz readings.
-        if direct_complete {
-            total = total.filter(|value| *value >= low.saturating_sub(1) && *value <= high + 1);
-        }
-        let sum: u64 = cores.iter().map(|value| u64::from(*value)).sum();
-        let average = ((sum + cores.len() as u64 / 2) / cores.len() as u64) as u32;
-        total = total.or(if direct_complete {
-            Some(average)
-        } else {
-            fallback_total.or(Some(average))
-        });
-    }
-    (total.or(fallback_total), cores)
+    (clock_total(total, &cores, cpu.logical), cores)
 }
 
-fn processor_index(name: &str, threads: &[CpuThread]) -> Option<usize> {
-    let (group, number) = name.split_once(',')?;
-    let (group, number) = (group.parse::<u16>().ok()?, number.parse::<u8>().ok()?);
-    threads
-        .binary_search_by_key(&(group, number), |t| (t.group, t.processor))
-        .ok()
+fn finish_clocks<'a>(
+    cpu: &CpuInfo,
+    (total, mut cores): (Option<u32>, Vec<u32>),
+    references: impl FnOnce() -> &'a [Option<u32>],
+    performance: impl FnOnce() -> Vec<(String, f64)>,
+) -> (Option<u32>, Vec<u32>) {
+    let full_topology = !cores.is_empty() && cores.len() == cpu.logical as usize;
+    if full_topology && !cores.contains(&0) {
+        return (
+            total.or_else(|| clock_total(None, &cores, cpu.logical)),
+            cores,
+        );
+    }
+
+    let percentages = performance();
+    if percentages.is_empty() {
+        return (total, cores);
+    }
+    let nominal_mhz = references();
+    // A system-wide percentage has a MHz denominator only when every
+    // processor reports the same nominal frequency.
+    let common = nominal_mhz.first().copied().flatten().filter(|base| {
+        full_topology
+            && nominal_mhz.len() == cores.len()
+            && nominal_mhz.iter().all(|v| *v == Some(*base))
+    });
+    let mut fallback_total = None;
+    for (name, value) in percentages {
+        let scaled = |base: u32| valid_mhz(f64::from(base) * value / 100.0);
+        if name == "_Total" {
+            fallback_total = common.and_then(scaled);
+        } else if let Some(index) = cpu.counter_index(&name)
+            && cores[index] == 0
+            && let Some(base) = nominal_mhz.get(index).copied().flatten()
+        {
+            cores[index] = scaled(base).unwrap_or(0);
+        }
+    }
+    (
+        total.or_else(|| clock_total(fallback_total, &cores, cpu.logical)),
+        cores,
+    )
+}
+
+impl super::Hardware {
+    /// Fill missing Windows clocks from a fresh sensor frame before the
+    /// client adds Windows readings to that frame's per-core details.
+    pub fn supplement_cpu_clocks(&mut self) {
+        let Some(frame) = self
+            .cpu_sensors
+            .as_ref()
+            .filter(|s| s.state == super::SensorState::Ready)
+        else {
+            return;
+        };
+        let threads = &self.cpu.threads;
+        if threads.is_empty()
+            || frame.cores.is_empty()
+            || (self.core_mhz.len() == threads.len() && !self.core_mhz.contains(&0))
+        {
+            return;
+        }
+        let mut physical = vec![0; self.cpu.cores as usize];
+        for core in &frame.cores {
+            if let Some(mhz) = core.clock_mhz.and_then(|v| valid_mhz(f64::from(v)))
+                && let Some(index) = self.cpu.thread_index(core.group, core.processor)
+                && threads[index].core == core.core
+                && let Some(slot) = physical.get_mut(core.core as usize)
+            {
+                *slot = mhz;
+            }
+        }
+        if !physical.iter().any(|mhz| *mhz > 0) {
+            return;
+        }
+        self.core_mhz.resize(threads.len(), 0);
+        for (mhz, thread) in self.core_mhz.iter_mut().zip(threads) {
+            if *mhz == 0
+                && let Some(clock) = physical.get(thread.core as usize)
+            {
+                *mhz = *clock;
+            }
+        }
+        self.cpu_mhz = self
+            .cpu_mhz
+            .or_else(|| clock_total(None, &self.core_mhz, self.cpu.logical));
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::CpuThread;
     use super::*;
+
+    fn clocks(
+        cpu: &CpuInfo,
+        actual: &[(String, f64)],
+        nominal: &[Option<u32>],
+        performance: impl FnOnce() -> Vec<(String, f64)>,
+    ) -> (Option<u32>, Vec<u32>) {
+        finish_clocks(cpu, pdh_clocks(cpu, actual), || nominal, performance)
+    }
 
     fn cpu(threads: u8) -> CpuInfo {
         CpuInfo {
             base_mhz: 2500,
             sockets: 1,
             logical: u32::from(threads),
+            counter_threads: [(0, (0..usize::from(threads)).map(Some).collect())].into(),
             threads: (0..threads)
                 .map(|processor| CpuThread {
                     group: 0,
@@ -292,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_mhz_readings_do_not_use_a_package_reference_or_performance_percentage() {
+    fn hybrid_direct_mhz_takes_priority_and_missing_references_stay_unknown() {
         let mut cpu = cpu(22);
         cpu.base_mhz = 3000;
         cpu.efficiency_cores = 10;
@@ -316,19 +415,51 @@ mod tests {
         actual.push(("_Total".into(), 4227.27));
         let performance = values(&[("_Total", 300.0), ("0,0", 342.85)]);
         assert_eq!(performance_reference(&cpu), None);
-        let (total, per_core) = clocks(
-            &cpu.threads,
-            &actual,
-            &performance,
-            performance_reference(&cpu),
-        );
+        let (total, per_core) = clocks(&cpu, &actual, &[None; 22], || {
+            panic!("all direct readings are present")
+        });
         assert_eq!(total, Some(4227));
         assert_eq!(per_core[0], 4800);
         assert_eq!(per_core[12], 3800);
         assert_eq!(per_core[20], 2500);
+        assert_eq!(clocks(&cpu, &[], &[None; 22], || performance).0, None);
+    }
+
+    #[test]
+    fn windows_10_hybrid_clocks_use_each_processors_nominal_mhz() {
+        let mut cpu = cpu(32);
+        cpu.hybrid = true;
+        cpu.base_mhz = 2400;
+        cpu.efficiency_cores = 16;
+        for thread in &mut cpu.threads[16..] {
+            thread.efficient = true;
+        }
+        let mut nominal = vec![Some(2400); 32];
+        nominal[16..].fill(Some(1800));
+        let mut performance: Vec<_> = (0..32).rev().map(|i| (format!("0,{i}"), 150.0)).collect();
+        performance.extend(values(&[("_Total", 300.0), ("0,_Total", 300.0)]));
+        let missing = values(&[("_Total", 0.0), ("0,0", 0.0), ("0,31", f64::NAN)]);
+        let (total, cores) = clocks(&cpu, &missing, &nominal, || performance.clone());
+        assert_eq!(total, Some(3150));
+        assert_eq!(cores[..16], [3600; 16]);
+        assert_eq!(cores[16..], [2700; 16]);
+
+        nominal[31] = None;
+        let (total, cores) = clocks(&cpu, &[], &nominal, || performance.clone());
+        assert_eq!(total, None);
+        assert_eq!(cores[31], 0);
+        let direct = values(&[("0,31", 3500.0)]);
+        let (total, cores) = clocks(&cpu, &direct, &nominal, || performance.clone());
+        assert_eq!(total, Some(3175));
+        assert_eq!(cores[31], 3500);
+
+        // A shared reference reported by every processor also covers a provider
+        // that only returns the system-wide percentage (e.g. parked threads).
         assert_eq!(
-            clocks(&cpu.threads, &[], &performance, performance_reference(&cpu)).0,
-            None
+            clocks(&cpu, &[], &[Some(2400); 32], || values(&[(
+                "_Total", 150.0
+            )])),
+            (Some(3600), vec![0; 32])
         );
     }
 
@@ -337,28 +468,19 @@ mod tests {
         let cpu = cpu(2);
         let performance = values(&[("0,0", 160.0), ("0,1", 120.0), ("_Total", 140.0)]);
         assert_eq!(performance_reference(&cpu), Some(2500));
+        let references = [performance_reference(&cpu); 2];
         assert_eq!(
-            clocks(&cpu.threads, &[], &performance, performance_reference(&cpu)),
+            clocks(&cpu, &[], &references, || performance.clone()),
             (Some(3500), vec![4000, 3000])
         );
         let actual = values(&[("0,0", 3800.0), ("0,1", 2800.0), ("_Total", 3300.0)]);
         assert_eq!(
-            clocks(
-                &cpu.threads,
-                &actual,
-                &performance,
-                performance_reference(&cpu)
-            ),
+            clocks(&cpu, &actual, &references, || performance.clone()),
             (Some(3300), vec![3800, 2800])
         );
         let partial = values(&[("0,0", 3800.0)]);
         assert_eq!(
-            clocks(
-                &cpu.threads,
-                &partial,
-                &performance,
-                performance_reference(&cpu)
-            ),
+            clocks(&cpu, &partial, &references, || performance),
             (Some(3500), vec![3800, 3000])
         );
         let mut mixed = cpu;
@@ -379,8 +501,13 @@ mod tests {
                 ..Default::default()
             })
             .collect::<Vec<_>>();
+        let mut cpu = CpuInfo {
+            threads,
+            counter_threads: [(0, vec![Some(0), Some(1)]), (1, vec![Some(2), Some(3)])].into(),
+            ..cpu(4)
+        };
         let actual = values(&[
-            ("1,2", 1000.0),
+            ("1,1", 1000.0),
             ("0,0", 4000.0),
             ("0,_Total", 9000.0),
             ("1,_Total", 8000.0),
@@ -389,17 +516,86 @@ mod tests {
             ("_Total", 9999.0),
         ]);
         assert_eq!(
-            clocks(&threads, &actual, &[], None),
+            clocks(&cpu, &actual, &[None; 4], Vec::new),
             (Some(2500), vec![4000, 3000, 2000, 1000])
         );
         assert_eq!(
-            clocks(&threads, &values(&[("0,0", 4000.0)]), &[], None),
+            clocks(&cpu, &values(&[("0,0", 4000.0)]), &[None; 4], Vec::new),
             (None, vec![4000, 0, 0, 0])
         );
         assert_eq!(
-            clocks(&threads, &values(&[("_Total", 3500.0)]), &[], None).0,
+            clocks(&cpu, &values(&[("_Total", 3500.0)]), &[None; 4], Vec::new).0,
             Some(3500)
         );
+        let performance = || {
+            values(&[
+                ("1,1", 200.0),
+                ("0,0", 100.0),
+                ("1,0", 150.0),
+                ("0,1", 125.0),
+                ("1,_Total", 5.0),
+                ("_Total", 250.0),
+            ])
+        };
+        let nominal = [Some(2000), Some(2000), Some(1500), Some(1500)];
+        assert_eq!(
+            clocks(&cpu, &[], &nominal, performance),
+            (Some(2438), vec![2000, 2500, 2250, 3000])
+        );
+        cpu.logical = 5;
+        assert_eq!(clocks(&cpu, &[], &[Some(2000); 4], performance).0, None);
+    }
+
+    #[test]
+    fn sensor_clocks_fill_smt_siblings_only_for_a_matching_physical_core() {
+        use super::super::{CpuCoreSensors, CpuSensors, Hardware, SensorState};
+        let mut cpu = cpu(3);
+        cpu.cores = 2;
+        cpu.threads[2].core = 1;
+        let mut hw = Hardware {
+            cpu: Arc::new(cpu),
+            core_mhz: vec![4200, 0, 0],
+            cpu_sensors: Some(CpuSensors {
+                cores: vec![
+                    CpuCoreSensors {
+                        core: 1,
+                        processor: 0,
+                        clock_mhz: Some(9000.),
+                        ..Default::default()
+                    },
+                    CpuCoreSensors {
+                        core: 0,
+                        processor: 1,
+                        clock_mhz: Some(4000.),
+                        ..Default::default()
+                    },
+                    CpuCoreSensors {
+                        core: 1,
+                        processor: 2,
+                        clock_mhz: Some(f32::NAN),
+                        effective_mhz: Some(250.),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        hw.supplement_cpu_clocks();
+        assert_eq!(hw.core_mhz, [4200, 0, 0]);
+        hw.cpu_sensors.as_mut().unwrap().state = SensorState::Ready;
+        hw.supplement_cpu_clocks();
+        assert_eq!(hw.core_mhz, [4200, 4000, 0]);
+        assert_eq!(hw.cpu_mhz, None);
+        hw.cpu_sensors.as_mut().unwrap().cores[2].clock_mhz = Some(2600.);
+        hw.supplement_cpu_clocks();
+        assert_eq!(hw.core_mhz, [4200, 4000, 2600]);
+        assert_eq!(hw.cpu_mhz, Some(3600));
+        hw.core_mhz.clear();
+        hw.cpu_mhz = Some(3550);
+        hw.supplement_cpu_clocks();
+        assert_eq!(hw.core_mhz, [4000, 4000, 2600]);
+        assert_eq!(hw.cpu_mhz, Some(3550));
     }
 
     #[test]
@@ -416,22 +612,20 @@ mod tests {
         ] {
             assert_eq!(
                 clocks(
-                    &cpu.threads,
+                    &cpu,
                     &values(&[("0,0", value), ("_Total", value)]),
-                    &[],
-                    None
+                    &[None],
+                    Vec::new
                 ),
                 (None, vec![0])
             );
         }
         for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
             assert_eq!(
-                clocks(
-                    &cpu.threads,
-                    &[],
-                    &values(&[("0,0", value), ("_Total", value)]),
-                    Some(2500)
-                ),
+                clocks(&cpu, &[], &[Some(2500)], || values(&[
+                    ("0,0", value),
+                    ("_Total", value)
+                ])),
                 (None, vec![0])
             );
         }
@@ -440,57 +634,69 @@ mod tests {
     #[test]
     #[ignore = "read-only CPU clock counters using the current account"]
     fn live_cpu_clocks() {
-        let cpu = super::super::cpu_info();
-        let query = Query::open().unwrap();
-        let actual = query.add(w!(r"\Processor Information(*)\Actual Frequency"));
-        let nominal = query.add(w!(r"\Processor Information(*)\Processor Frequency"));
-        let performance = query.add(w!(r"\Processor Information(*)\% Processor Performance"));
-        let mut buf = AlignedBuf::with_capacity(16 * 1024);
-        query.collect();
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        query.collect();
-        println!(
-            "base_mhz={}; performance_reference={:?}",
-            cpu.base_mhz,
-            performance_reference(&cpu)
-        );
-        for (name, counter) in [
-            ("actual", actual),
-            ("nominal", nominal),
-            ("performance", performance),
-        ] {
-            println!("{name}: {:?}", counter.map(|c| pdh::array(c, &mut buf)));
+        let cpu = Arc::new(super::super::cpu_info());
+        let mut sensors = Sensors::new(cpu.clone());
+        let named_query = Query::open();
+        let named = named_query
+            .as_ref()
+            .and_then(|q| q.add(w!(r"\Processor Information(*)\Actual Frequency")));
+        if let Some(q) = &named_query {
+            q.collect();
         }
-        let mut sensors = Sensors::new(&cpu).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        let started = std::time::Instant::now();
-        let sample = sensors.sample();
-        println!(
-            "sample_us={}; selected_mhz={:?}; cores={:?}",
-            started.elapsed().as_micros(),
-            sample.cpu_mhz,
-            sample.core_mhz
-        );
-        if let Some(counter) = sensors.core_freq {
-            let values = pdh::array_uncapped(counter, &mut sensors.buf);
-            if let Some(total) = values
-                .iter()
-                .find(|(name, _)| name == "_Total")
-                .and_then(|(_, value)| valid_mhz(*value))
-            {
-                let low = sample
-                    .core_mhz
-                    .iter()
-                    .filter(|value| **value > 0)
-                    .min()
-                    .copied();
-                let high = sample.core_mhz.iter().max().copied();
-                if low
-                    .zip(high)
-                    .is_some_and(|(low, high)| total >= low && total <= high)
-                {
-                    assert_eq!(sample.cpu_mhz, Some(total));
-                    println!("selected aggregate matches the same PDH collection: {total} MHz");
+        println!("{}", cpu.name);
+        let mut saved = None;
+        for path in [
+            "PCW",
+            "PCW without PDH",
+            "PCW without PDH",
+            "performance percentage",
+        ] {
+            if path == "PCW without PDH" && saved.is_none() {
+                saved = sensors.query.take();
+            }
+            if path == "performance percentage" {
+                sensors.query = saved.take();
+                sensors.raw_clocks = None;
+                sensors.core_freq = None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let started = std::time::Instant::now();
+            let sample = sensors.sample();
+            let elapsed = started.elapsed();
+            let reference = named
+                .filter(|_| named_query.as_ref().is_some_and(Query::collect))
+                .and_then(|c| {
+                    pdh::array_uncapped(c, &mut sensors.buf)
+                        .into_iter()
+                        .find(|(n, _)| n == "_Total")
+                        .and_then(|(_, v)| valid_mhz(v))
+                });
+            let cores = sample.core_mhz.iter().filter(|v| **v > 0).count();
+            println!(
+                "{path}: sample_us={}; selected={:?}; named_pdh={reference:?}; cores={cores}/{}",
+                elapsed.as_micros(),
+                sample.cpu_mhz,
+                cpu.logical
+            );
+            if path != "performance percentage" {
+                let [(n0, b0), (n1, b1)] =
+                    sensors.raw_clocks.as_ref().unwrap().total_pair().unwrap();
+                let delta = u128::from(n1.checked_sub(n0).unwrap());
+                let base = u128::from(b1.wrapping_sub(b0));
+                assert_ne!(base, 0);
+                let mhz = ((delta + base / 2) / base) as u32;
+                println!("_Total: delta33={delta} delta34={base} rounded_mhz={mhz}");
+                assert_eq!(sample.cpu_mhz, Some(mhz));
+            } else if let Some(perf) = sensors.core_perf {
+                for (name, percent) in pdh::array_uncapped(perf, &mut sensors.buf) {
+                    if let Some(index) = cpu.counter_index(&name)
+                        && let Some(base) = sensors.nominal_mhz.get().and_then(|refs| refs[index])
+                    {
+                        assert_eq!(
+                            sample.core_mhz[index],
+                            valid_mhz(f64::from(base) * percent / 100.0).unwrap_or(0)
+                        );
+                    }
                 }
             }
         }
@@ -537,19 +743,13 @@ mod tests {
         }
     }
     #[test]
-    fn idle_instances_preserve_groups_and_ignore_rollups() {
-        let threads: Vec<_> = [(0, 0), (0, 1), (1, 0), (1, 2)]
-            .into_iter()
-            .map(|(group, processor)| CpuThread {
-                group,
-                processor,
-                ..Default::default()
-            })
-            .collect();
-        assert_eq!(processor_index("1,2", &threads), Some(3));
-        assert_eq!(processor_index("1,1", &threads), None);
+    fn idle_instances_use_numa_node_indices_and_ignore_rollups() {
+        let mut cpu = cpu(4);
+        cpu.counter_threads = [(0, vec![Some(0), Some(2)]), (7, vec![Some(1), Some(3)])].into();
+        assert_eq!(cpu.counter_index("7,1"), Some(3));
+        assert_eq!(cpu.counter_index("0,1"), Some(2));
         for value in ["_Total", "0,_Total", "0,64", "9999,1", "0,-1"] {
-            assert_eq!(processor_index(value, &threads), None);
+            assert_eq!(cpu.counter_index(value), None);
         }
     }
 }

@@ -57,6 +57,12 @@ const SIDE_COLUMNS: usize = 3;
 const SPECS_MIN: f32 = 280.;
 /// Smallest chart heights before the page scrolls (main, half, small).
 const MAIN_MIN: f32 = 120.;
+/// The logical processors' grid holds many graphs: where the figures and
+/// specs would leave it less than this, it takes up to this much of what
+/// shows of the view (all of it, in a short window) rather than shrink its
+/// cards to slivers, and they move below it (the page scrolls to them).
+/// About the height of the native task manager's grid in a small window.
+const CORE_GRID_COMFORT: f32 = 300.;
 const HALF_MIN: f32 = 80.;
 const SMALL_MIN: f32 = 64.;
 /// A detail card at most this tall (its content box) draws the chart
@@ -69,6 +75,18 @@ pub(in crate::frontend) const KERNEL_TIME: &str = "cpuKernelTime";
 /// that deepens the usage curve's own.
 const CORE_KERNEL_LINE: f32 = 0.6;
 const CORE_KERNEL_FILL: f32 = 0.4;
+
+/// How the logical processors' cards draw their captions: the row laid out
+/// above the chart frame (none while hidden) and whether it holds the
+/// frequency; whether the caption and the frequency are drawn at all (also
+/// while they fade out).
+#[derive(Clone, Copy)]
+struct CardCaption {
+    row: Pixels,
+    full: bool,
+    shown: bool,
+    detail: bool,
+}
 
 /// A logical processor's core type on a hybrid CPU, as `hardware.cpu.threads`
 /// tell it.
@@ -842,14 +860,16 @@ impl Desktop {
         );
         kernel_fade::stepped(level, graphs)
     }
-    /// The device list, the CPU graphs' kernel time layer and the logical
-    /// processors' grid as tests see them (test control `inspectLayout`).
+    /// The device list, the CPU graphs' view, core type and kernel time layer,
+    /// and the logical processors' grid as tests see them (test control
+    /// `inspectLayout`).
     pub(in crate::frontend) fn performance_test_state(&self) -> Value {
         let devices = self.listed_devices();
         let shown = self.shown_devices(&devices);
         let selected = selected_device(&devices, &shown, &self.device);
         let mut hidden = self.hidden_devices().into_iter().collect::<Vec<_>>();
         hidden.sort();
+        let (room, shows) = self.core_grid_size.get();
         json!({
             "devices": devices
                 .iter()
@@ -862,29 +882,77 @@ impl Desktop {
             "arranged": self.prefs.get::<Vec<String>>(rail::ORDER, Vec::new()),
             "selected": devices.get(selected).map(|device| device.id.as_str()),
             "kernelTime": self.prefs.get(KERNEL_TIME, true),
+            "cpuMode": self.cpu_mode,
+            "coreFilter": self.core_filter(&CoreKind::present(&self.snapshot["hardware"]["cpu"])),
             "overallSeries": self.chart_series("cpu-overall-plot"),
             "coreSeries": self.chart_series("cpu-0"),
             "coreColumns": self.core_columns.get(),
+            "coreRoom": [f32::from(room.width), f32::from(room.height), f32::from(shows)],
+            "coreCaption": match self.core_caption.get() {
+                model::CoreCaption::Full => "full",
+                model::CoreCaption::Short => "short",
+                model::CoreCaption::Hidden => "hidden",
+            },
             "coreKinds": CoreKind::present(&self.snapshot["hardware"]["cpu"])
                 .into_iter()
                 .map(CoreKind::key)
                 .collect::<Vec<_>>(),
+            "diskDetails": self.disk_details_test_state(),
         })
     }
-    /// The CPU graphs' menu.
+    /// The core type the processors' grid shows: `all` or one of `kinds`.
+    /// A type this CPU lacks (a preference from other hardware) shows all.
+    fn core_filter(&self, kinds: &[CoreKind]) -> String {
+        let filter: String = self.prefs.get("coreFilter", "all".into());
+        if kinds.iter().any(|kind| kind.key() == filter) {
+            filter
+        } else {
+            "all".into()
+        }
+    }
+    /// The CPU graphs' menu: the view, the core type the processors' grid
+    /// shows on a hybrid CPU, and the kernel time layer.
     pub(in crate::frontend) fn cpu_graph_menu(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let logical = self.cpu_mode == "logical";
+        let mut items = ["overall", "logical"]
+            .into_iter()
+            .map(|mode| {
+                MenuItem::new(
+                    label(&format!("performance.cpu.view.{mode}")),
+                    Action::CpuMode(mode.into()),
+                )
+                .checked(self.cpu_mode == mode)
+            })
+            .collect::<Vec<_>>();
+        let kinds = CoreKind::present(&self.snapshot["hardware"]["cpu"]);
+        if logical && !kinds.is_empty() {
+            let filter = self.core_filter(&kinds);
+            items.push(MenuItem::separator());
+            items.extend(
+                std::iter::once("all")
+                    .chain(kinds.iter().map(|kind| kind.key()))
+                    .map(|choice| {
+                        MenuItem::new(
+                            label(&format!("performance.cpu.filter.{choice}")),
+                            Action::Preference("coreFilter".into(), json!(choice)),
+                        )
+                        .checked(choice == filter)
+                    }),
+            );
+        }
         let shown = self.prefs.get(KERNEL_TIME, true);
-        let items = vec![
+        items.push(MenuItem::separator());
+        items.push(
             MenuItem::new(
                 label("performance.cpu.showKernelTime"),
                 Action::Preference(KERNEL_TIME.into(), json!(!shown)),
             )
             .checked(shown),
-        ];
+        );
         self.open_popup(items, window, cx);
     }
     /// The device list's width: at most half the page, so the detail never gets squeezed.
@@ -1693,8 +1761,23 @@ impl Desktop {
         match hint {
             Some(hint) => div()
                 .id(id)
+                .relative()
                 .min_w_0()
                 .child(stat)
+                // Where tests hover the figure.
+                .when(self.options.test, |d| {
+                    let anchors = self.ui.anchors.clone();
+                    d.child(
+                        canvas(
+                            move |bounds, _, _| {
+                                anchors.borrow_mut().insert(id.into(), bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                })
                 .tooltip(move |window, cx| {
                     widgets::wrapping_tooltip(hint.clone(), px(HINT_WIDTH), window, cx)
                 })
@@ -1841,15 +1924,8 @@ impl Desktop {
             .child(note)
             .into_any_element()
     }
-    /// A details card's title (with an optional note), a one-line summary on the right, and its body.
-    fn card(
-        &self,
-        title: String,
-        note: Option<String>,
-        summary: Option<String>,
-        alert: bool,
-        body: impl IntoElement,
-    ) -> AnyElement {
+    /// A details card's surface: its padding, border and fill.
+    fn card_frame(&self, alert: bool) -> Div {
         let p = self.palette;
         div()
             .min_w_0()
@@ -1864,6 +1940,18 @@ impl Desktop {
             })
             .rounded(px(8.))
             .bg(p.layer)
+    }
+    /// A details card's title (with an optional note), a one-line summary on the right, and its body.
+    fn card(
+        &self,
+        title: String,
+        note: Option<String>,
+        summary: Option<String>,
+        alert: bool,
+        body: impl IntoElement,
+    ) -> AnyElement {
+        let p = self.palette;
+        self.card_frame(alert)
             .child(
                 div()
                     .flex()
@@ -1983,58 +2071,12 @@ impl Desktop {
             out.push(self.cpu_details(hw, window, cx));
             return out;
         }
+        // The view and the core type are chosen in the graphs' menu
+        // (`cpu_graph_menu`).
         let kinds = CoreKind::present(cpu);
         let hybrid = !kinds.is_empty();
-        // A type this CPU lacks (a preference from other hardware) shows all.
-        let filter: String = self.prefs.get("coreFilter", "all".into());
-        let filter = if kinds.iter().any(|kind| kind.key() == filter) {
-            filter
-        } else {
-            "all".into()
-        };
+        let filter = self.core_filter(&kinds);
         let logical = self.cpu_mode == "logical";
-        let mut controls = Vec::new();
-        if hybrid && logical {
-            controls.push(
-                self.segments(
-                    "core-filter",
-                    std::iter::once("all")
-                        .chain(kinds.iter().map(|kind| kind.key()))
-                        .map(|choice| {
-                            (
-                                label(&if choice == "all" {
-                                    "performance.cpu.filterAll".into()
-                                } else {
-                                    format!("performance.cpu.filterShort.{choice}")
-                                }),
-                                None,
-                                Action::Preference("coreFilter".into(), json!(choice)),
-                                choice == filter,
-                            )
-                        })
-                        .collect(),
-                    cx,
-                ),
-            );
-        }
-        controls.push(
-            self.segments(
-                "cpu-mode",
-                ["overall", "logical"]
-                    .into_iter()
-                    .map(|mode| {
-                        (
-                            label(&format!("performance.cpu.{mode}")),
-                            None,
-                            Action::CpuMode(mode.into()),
-                            self.cpu_mode == mode,
-                        )
-                    })
-                    .collect(),
-                cx,
-            ),
-        );
-        out.push(self.perf_toolbar(controls));
         out.push(self.cpu_graphs(logical, hybrid, &filter, window, cx));
         // Live figures.
         let mut stats = vec![
@@ -2233,17 +2275,21 @@ impl Desktop {
         let cores = window.use_keyed_state("cpu-core-motion", cx, |_, _| {
             cpu_motion::CoreMotion::default()
         });
-        let drawn = cores.read(cx).drawn(&motions);
+        let drawn = {
+            let cores = cores.read(cx);
+            (cores.drawn(&motions), cores.drawn_caption(&motions))
+        };
         let done = self.render_page_later(cx);
         let leaving = switch.update(cx, |switch, _| {
             switch.update(logical, animate, &motions, || drawn, done)
         });
-        let (area, ghost, ghost_cards) = {
+        let (area, ghost, ghost_cards, ghost_caption) = {
             let switch = switch.read(cx);
             (
                 switch.area.clone(),
                 switch.ghost.clone(),
                 switch.cards.clone(),
+                switch.caption,
             )
         };
         let lives = |transform: &LiveTransform| charts::Live {
@@ -2297,7 +2343,23 @@ impl Desktop {
                     .iter()
                     .map(|(index, card)| (*index, *card, None))
                     .collect::<Vec<_>>();
-                self.core_layout(hybrid, kernel, &cards, None, None, px(0.), false, cx)
+                let caption = CardCaption {
+                    row: ghost_caption.height,
+                    full: ghost_caption.detail > 0.5,
+                    shown: ghost_caption.height > px(0.),
+                    detail: ghost_caption.detail > 0.5,
+                };
+                self.core_layout(
+                    hybrid,
+                    kernel,
+                    &cards,
+                    caption,
+                    None,
+                    None,
+                    px(0.),
+                    false,
+                    cx,
+                )
             } else {
                 self.cpu_overall_chart(kernel, cx)
             };
@@ -2401,57 +2463,108 @@ impl Desktop {
             .filter(|index| filter == "all" || CoreKind::of(threads.get(*index)).key() == filter)
             .collect::<Vec<_>>();
         let gap = theme::dimension("coreGap");
-        let cell_width = theme::dimension("coreMinWidth");
-        let cell_height = theme::dimension("coreMinHeight");
+        let (caption_width, short_caption_width) =
+            self.core_caption_widths(hybrid, &visible, window, cx);
         let header = theme::dimension("coreHeaderHeight");
-        // Below the preferred card height the cards flatten to this before the view scrolls.
-        let fit_height = theme::dimension("coreFitHeight");
-        // The grid's size in this display; until it is known, the size it last had.
+        // The room the grid has in this display before the view scrolls, and
+        // how much of the view shows below its top (less the legend); until
+        // they are known, as they last were.
         let here_state = window.use_keyed_state("cpu-core-grid-size", cx, |_, _| None);
-        let here: Option<Size<Pixels>> = *here_state.read(cx);
-        let measured = here.unwrap_or_else(|| self.core_grid_size.get());
+        let here: Option<(Size<Pixels>, Pixels)> = *here_state.read(cx);
+        let (measured, shows) = here.unwrap_or_else(|| self.core_grid_size.get());
         let available = if measured.width > px(0.) {
             measured.width
         } else {
             px(self.detail_width(window))
         };
+        // Where the figures and specs leave it less, the grid takes up to a
+        // comfortable height of what shows of the view, and they move below.
+        let floor = shows.min(px(CORE_GRID_COMFORT)).max(px(MAIN_MIN));
+        let room_height = measured.height.max(floor);
+        let legend = if hybrid {
+            px(6.) + theme::font(12.) * 1.4
+        } else {
+            px(0.)
+        };
         let previous = window.use_keyed_state("cpu-core-columns", cx, |_, _| (0usize, 0usize));
         let (previous_count, previous_columns) = *previous.read(cx);
-        let columns = model::core_grid_columns(
-            &model::CoreGrid {
-                count: visible.len(),
-                width: f32::from(available),
-                height: f32::from(measured.height),
-                cell_width: f32::from(cell_width),
-                cell_height: f32::from(cell_height),
-                header_height: f32::from(header),
-                gap: f32::from(gap),
-            },
+        let grid = model::CoreGrid {
+            count: visible.len(),
+            width: f32::from(available),
+            height: f32::from(room_height),
+            caption_width: f32::from(caption_width),
+            short_caption_width: f32::from(short_caption_width),
+            plot_width: f32::from(theme::dimension("corePlotMinWidth")),
+            plot_height: f32::from(theme::dimension("corePlotMinHeight")),
+            header_height: f32::from(header),
+            gap: f32::from(gap),
+        };
+        let chosen = model::core_grid_columns(
+            &grid,
             if previous_count == visible.len() {
                 previous_columns
             } else {
                 0
             },
         );
+        let columns = chosen.columns;
         previous.update(cx, |state, _| *state = (visible.len(), columns));
         self.core_columns.set(columns);
-        let rows = visible.len().div_ceil(columns).max(1);
+        self.core_caption.set(chosen.caption);
+        let rows = chosen.rows;
+        let row_min = px(chosen.row_min);
         let arrangement = cpu_motion::Grid {
             columns,
             rows,
             gap,
-            min_height: fit_height,
+            min_height: row_min,
+            caption: cpu_motion::Caption {
+                height: if chosen.caption == model::CoreCaption::Hidden {
+                    px(0.)
+                } else {
+                    header
+                },
+                detail: if chosen.caption == model::CoreCaption::Full {
+                    1.
+                } else {
+                    0.
+                },
+            },
         };
-        let area = size(available, measured.height);
+        let area = size(available, room_height);
         let grid_size = self.core_grid_size.clone();
         let first_layout = here.is_none() && !visible.is_empty();
         let owner = cx.entity().downgrade();
         let measuring = cores.clone();
+        let scroll = self.device_scroll.clone();
         let measure = canvas(
             move |bounds, window, cx| {
-                grid_size.set(bounds.size);
-                let previous = here_state.update(cx, |size, _| size.replace(bounds.size));
-                if bounds.size != measured {
+                // The view scrolls only where the grid's rows reach their least
+                // height: the room it has is its height less what the view
+                // overflows by (GPUI has measured the overflow before laying
+                // out the content). Whole pixels while it overflows, so that
+                // other arrangements, sized differently, find the same room.
+                let overflow = scroll.max_offset().y;
+                let room = if overflow > px(0.) {
+                    size(
+                        bounds.size.width,
+                        (bounds.size.height - overflow).max(px(0.)).floor(),
+                    )
+                } else {
+                    bounds.size
+                };
+                // From the grid's top, with the view not scrolled, to the
+                // view's bottom, less the legend under the grid.
+                let top = bounds.origin.y - scroll.offset().y;
+                let room = (
+                    room,
+                    (scroll.bounds().bottom() - top - legend)
+                        .max(px(0.))
+                        .floor(),
+                );
+                grid_size.set(room);
+                let previous = here_state.update(cx, |size, _| size.replace(room));
+                if room != (measured, shows) {
                     // Laid out at a size it does not have: again at its own.
                     if first_layout && !bounds.is_empty() {
                         window.defer_presentation_until_layout();
@@ -2542,17 +2655,71 @@ impl Desktop {
                 })
                 .collect::<Vec<_>>(),
         };
+        // Captions that fade out are drawn until they have gone.
+        let laid = arrangement.caption;
+        let caption = CardCaption {
+            row: laid.height,
+            full: laid.detail > 0.,
+            shown: moving
+                .as_ref()
+                .map_or(laid.height > px(0.), |moving| moving.shows_caption()),
+            detail: moving
+                .as_ref()
+                .map_or(laid.detail > 0., |moving| moving.shows_detail()),
+        };
         let grid = self.core_layout(
             hybrid,
             kernel,
             &cards,
+            caption,
             moving.as_deref(),
             Some(measure),
-            (fit_height + gap) * rows as f32 - gap,
+            ((row_min + gap) * rows as f32 - gap).max(floor),
             true,
             cx,
         );
         (grid, place)
+    }
+    /// The narrowest a processor's card goes with its caption (type badge,
+    /// number, frequency and load, as `core_card` draws them) on one line,
+    /// and with the caption short of the frequency, at the widest these take
+    /// for the `visible` processors.
+    fn core_caption_widths(
+        &self,
+        hybrid: bool,
+        visible: &[usize],
+        window: &Window,
+        cx: &App,
+    ) -> (Pixels, Pixels) {
+        let measure = |text: &str, size: f32, weight: FontWeight| {
+            window
+                .text_system()
+                .layout_line(
+                    text,
+                    theme::font(size),
+                    &[theme::text_run(text, weight, cx)],
+                    None,
+                )
+                .width
+        };
+        // Equal-width digits: the widest number has the most of them.
+        let number = visible.iter().max().copied().unwrap_or(0).to_string();
+        let mut name = measure(&number, 12., FontWeight::MEDIUM);
+        if hybrid {
+            let badge = CoreKind::present(&self.snapshot["hardware"]["cpu"])
+                .into_iter()
+                .map(|kind| (measure(kind.badge(), 10., FontWeight::BOLD) + px(6.)).max(px(15.)))
+                .max()
+                .unwrap_or(px(15.));
+            name += badge + px(6.);
+        }
+        let frequency = px(6. + 2.) + measure(&ghz(9990.), 11., FontWeight::NORMAL);
+        let load = measure("100", 13., FontWeight::SEMIBOLD)
+            + px(1.)
+            + measure("%", 10.5, FontWeight::NORMAL);
+        // The caption's gap (`gap_2`) and side padding; a pixel against rounding.
+        let short = name + window.rem_size() * 0.5 + load + px(2. + 1.);
+        ((short + frequency).ceil(), short.ceil())
     }
     /// The grid holding `cards`, with the legend below. While the cards
     /// rearrange (`moving`), each is drawn inside its live transforms;
@@ -2563,6 +2730,7 @@ impl Desktop {
         hybrid: bool,
         kernel: f32,
         cards: &[(usize, cpu_motion::Card, Option<cpu_motion::Slot>)],
+        caption: CardCaption,
         moving: Option<&cpu_motion::Rearrangement>,
         measure: Option<AnyElement>,
         min_height: Pixels,
@@ -2599,6 +2767,7 @@ impl Desktop {
                 *card,
                 *slot,
                 lives,
+                caption,
                 hybrid,
                 kernel,
                 interactive,
@@ -2641,6 +2810,7 @@ impl Desktop {
         card: cpu_motion::Card,
         slot: Option<cpu_motion::Slot>,
         lives: Option<cpu_motion::CardLives>,
+        caption: CardCaption,
         hybrid: bool,
         kernel: f32,
         interactive: bool,
@@ -2759,6 +2929,26 @@ impl Desktop {
         }
         let mhz = number(&hw["coreMhz"], &index.to_string())
             .max(hw["coreMhz"][index].as_f64().unwrap_or(0.));
+        // What the caption leaves out, the tooltip tells, below the
+        // processor's name.
+        let mut left_out = String::new();
+        if caption.row <= px(0.)
+            && let Some(load) = value.as_f64()
+        {
+            left_out.push_str(&format!(
+                "\n{}: {}%",
+                label("performance.cpu.utilization"),
+                load.round()
+            ));
+        }
+        if mhz > 0. && !caption.full {
+            left_out.push_str(&format!(
+                "\n{}: {}",
+                label("performance.cpu.speed"),
+                ghz(mhz)
+            ));
+        }
+        tip.insert_str(tip.find('\n').unwrap_or(tip.len()), &left_out);
         let name = div()
             .flex()
             .items_center()
@@ -2786,16 +2976,24 @@ impl Desktop {
                     .font_weight(FontWeight::MEDIUM)
                     .child(index.to_string()),
             )
-            .when(mhz > 0., |d| {
-                d.child(
-                    div()
-                        .ml(px(2.))
-                        .min_w_0()
-                        .truncate()
-                        .text_size(theme::font(11.))
-                        .text_color(p.muted)
-                        .child(ghz(mhz)),
-                )
+            .when(mhz > 0. && caption.detail, |d| {
+                let frequency = div()
+                    .ml(px(2.))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme::font(11.))
+                    .text_color(p.muted)
+                    .child(ghz(mhz));
+                d.child(match &lives {
+                    Some(lives) => live(
+                        frequency,
+                        lives.detail.clone(),
+                        Anchor::TopLeft,
+                        Rc::new(Cell::new(Point::default())),
+                    )
+                    .into_any_element(),
+                    None => frequency.into_any_element(),
+                })
             });
         let load = div()
             .flex_none()
@@ -2845,6 +3043,19 @@ impl Desktop {
             .whitespace_nowrap()
             .child(name)
             .child(load);
+        // A caption fading out over a frame laid out without it stands
+        // above the frame as drawn, out of the card's flow.
+        let head = caption.shown.then(|| {
+            if caption.row > px(0.) {
+                head.into_any_element()
+            } else {
+                head.absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .into_any_element()
+            }
+        });
         let cell = div()
             .absolute()
             .map(|d| match slot {
@@ -2862,7 +3073,7 @@ impl Desktop {
             .when(lives.is_none(), |d| d.overflow_hidden())
             .flex()
             .flex_col()
-            .child(head)
+            .children(head)
             .child(chart);
         let cell = if interactive {
             cell.id(("core-cell", index))
@@ -2907,15 +3118,28 @@ impl Desktop {
                 .unwrap_or_default()
         );
         let (used, modified, standby, free) = memory_composition(sys);
+        let compression = &sys["memoryCompression"];
+        let compression = compression.is_object().then(|| {
+            (
+                number(compression, "resident"),
+                number(compression, "stored"),
+            )
+        });
+        // Compressed memory is part of the memory in use: the in-use fill in
+        // stripes, at its end next to the modified part. The pattern is laid
+        // out in device pixels.
+        let stripe = 2. * window.scale_factor();
+        let hatch = gpui_kit::gpui::pattern_slash(p.memory.opacity(0.55), stripe, stripe * 1.5);
+        let squeezed = compression.map_or(0., |(resident, _)| resident.clamp(0., used));
         let fraction = |bytes: f64| (bytes / total.max(1.)).clamp(0., 1.) as f32;
-        let segment = |start: f64, length: f64, color: Hsla| {
+        let segment = |start: f64, length: f64, fill: gpui_kit::gpui::Background| {
             div()
                 .absolute()
                 .top_0()
                 .bottom_0()
                 .left(relative(fraction(start)))
                 .w(relative(fraction(length)))
-                .bg(color)
+                .bg(fill)
         };
         let reading = |bytes: Option<f64>| bytes.map(theme::memory).unwrap_or_else(missing);
         let bar = div()
@@ -2927,12 +3151,19 @@ impl Desktop {
             .border_1()
             .border_color(p.memory.opacity(0.45))
             .rounded(px(4.))
-            .child(segment(0., used, p.memory.opacity(0.55)))
-            .child(segment(used, modified.unwrap_or(0.), p.memory.opacity(0.9)))
+            .child(segment(0., used - squeezed, p.memory.opacity(0.55).into()))
+            .when(squeezed > 0., |d| {
+                d.child(segment(used - squeezed, squeezed, hatch))
+            })
+            .child(segment(
+                used,
+                modified.unwrap_or(0.),
+                p.memory.opacity(0.9).into(),
+            ))
             .child(segment(
                 used + modified.unwrap_or(0.),
                 standby.unwrap_or(0.),
-                p.memory.opacity(0.2),
+                p.memory.opacity(0.2).into(),
             ));
         let legend_item =
             |id: &'static str, swatch: Div, description: &'static str, text: String| {
@@ -2969,6 +3200,17 @@ impl Desktop {
                     value = theme::memory(used)
                 ),
             ))
+            .when_some(compression, |d, (resident, _)| {
+                d.child(legend_item(
+                    "memory-legend-compressed",
+                    div().bg(hatch),
+                    "performance.memory.compressedDescription",
+                    tr!(
+                        "performance.memory.legendCompressed",
+                        value = theme::memory(resident)
+                    ),
+                ))
+            })
             .child(legend_item(
                 "memory-legend-modified",
                 div().bg(p.memory.opacity(0.9)),
@@ -2992,8 +3234,57 @@ impl Desktop {
             ));
         let gb_stat =
             |key: &str, bytes: f64| self.stat(label(key), gb(bytes), Some("GB".into()), None, cx);
+        let in_use = if let Some((resident, stored)) = compression {
+            // "39.5 GB (3.4 GB)", as Task Manager's "In use (Compressed)".
+            let unit = |unit: String| {
+                div()
+                    .ml(px(2.))
+                    .text_size(theme::font(13.))
+                    .text_color(p.muted)
+                    .child(unit)
+            };
+            let (part, part_unit) = if resident >= GIB {
+                (gb(resident), "GB")
+            } else {
+                (format!("{}", (resident / MIB).round()), "MB")
+            };
+            let value = div()
+                .flex()
+                .items_baseline()
+                .child(gb(used))
+                .child(unit("GB".into()))
+                .child(div().ml(px(6.)).child(format!("({part}")))
+                .child(unit(part_unit.into()))
+                .child(")")
+                .into_any_element();
+            let hint = [
+                tr!(
+                    "performance.memory.legendInUse",
+                    value = theme::memory(used)
+                ),
+                label("performance.memory.inUseDescription"),
+                String::new(),
+                tr!(
+                    "performance.memory.legendCompressed",
+                    value = theme::memory(resident)
+                ),
+                tr!(
+                    "performance.memory.compressedSaving",
+                    stored = theme::memory(stored),
+                    saved = theme::memory((stored - resident).max(0.))
+                ),
+            ]
+            .join("\n");
+            self.hinted(
+                "memory-stat-in-use",
+                Some(hint),
+                self.stat_element(label("performance.memory.inUseCompressed"), value, None, cx),
+            )
+        } else {
+            gb_stat("performance.memory.inUse", used)
+        };
         let stats = vec![
-            gb_stat("performance.memory.inUse", used),
+            in_use,
             gb_stat("performance.memory.available", number(sys, "memAvailable")),
             self.stat(
                 label("performance.memory.committed"),

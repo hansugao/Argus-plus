@@ -104,6 +104,9 @@ pub(in crate::frontend) struct UiState {
     /// places gliding there (`flip`).
     pub order_drag: RefCell<Option<flip::Drag>>,
     pub order_flips: flip::Flips,
+    /// A kind of reading or a reading dragged on the components page, to
+    /// arrange a monitor's readings.
+    pub readings_order: reorder::Reorder,
     /// Where a test's pointer gesture began (test control `pointer`).
     pub gesture_origin: Cell<Option<Point<Pixels>>>,
     /// The table item under a new contact, retained while live rows reorder.
@@ -114,11 +117,6 @@ pub(in crate::frontend) struct UiState {
     pub modal_seq: u64,
     /// Dialogs that wait for the onboarding to close.
     pub queued: Vec<(String, Value)>,
-    /// Settings page: measured width, the clicked section and smooth scrolling.
-    pub settings_width: Rc<Cell<Pixels>>,
-    pub settings_picked: bool,
-    pub settings_jump_wait: bool,
-    pub settings_scroll: Option<(Pixels, Pixels, Instant)>,
     pub located: Option<(String, Instant)>,
     pub focus_rule: Option<(String, Instant)>,
     /// Cards running an action, and the errors they show.
@@ -319,6 +317,8 @@ pub(in crate::frontend) fn service_state(status: &Value) -> String {
         "stopped" => "stopped",
         "startPending" => "startPending",
         "stopPending" => "stopPending",
+        "broken" => "broken",
+        "deletePending" => "deletePending",
         _ => "unavailable",
     };
     label(&format!("settings.privilege.state.{key}"))

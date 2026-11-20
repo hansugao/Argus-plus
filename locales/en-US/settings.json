@@ -107,8 +107,11 @@
     "history": "When the history chart has focus",
     "time": "Select the previous / next point in time",
     "timeJump": "Move backward / forward by a larger amount",
-    "timeEnds": "Select the earliest / latest point in time",
-    "latest": "Clear the time selection and return to the latest data"
+    "timeFirst": "Select the earliest point on the chart",
+    "latest": "Go back to the latest readings and keep updating",
+    "zoom": "Zoom in / out",
+    "zoomReset": "Show the whole range",
+    "clearCursor": "Clear the cursor and selection"
   },
   "hotkey": {
     "title": "Show or hide Argus",
@@ -169,13 +172,15 @@
       "stopped": "Stopped",
       "startPending": "Starting",
       "stopPending": "Stopping",
-      "unavailable": "Unavailable"
+      "unavailable": "Unavailable",
+      "broken": "Damaged",
+      "deletePending": "Being removed"
     },
     "outdated": "Service version {service} doesn't match Argus {app}. Click Update service.",
     "incompatible": "Click Update service to install the version that matches Argus; Argus then connects to it.",
     "install": {
       "title": "Enable the privileged service?",
-      "body": "Once it's installed, the current Windows account can use the background service, without asking for permission again, to:\n· end, suspend or resume processes of any user (except critical system processes) and set their priority, I/O priority, memory priority and efficiency mode;\n· start and stop any Windows service and change its startup type, including services of security software and Windows Update;\n· close any IPv4 TCP connection, and see every process's file locks, network traffic, and disk reads and writes;\n· query disk identity, SMART attributes, and health logs using fixed read-only commands;\n· read CPU sensor data and motherboard fan speeds through fixed modules when PawnIO is installed.\n\nOther programs running as a standard user under this account can use these operations too, which effectively gives the account some administrator rights. Install it only on an account that you use yourself. The service starts with Windows. Installing requires administrator permission; the service can be uninstalled in Settings later.",
+      "body": "Once it's installed, the current Windows account can use the background service, without asking for permission again, to:\n· end, suspend or resume processes of any user (except critical system processes) and set their priority, I/O priority, memory priority and efficiency mode;\n· start, stop and delete any Windows service and change its startup type, including services of security software and Windows Update;\n· close any IPv4 TCP connection, and see every process's file locks, network traffic, and disk reads and writes;\n· query disk identity, SMART attributes, and health logs using fixed read-only commands;\n· read CPU sensor data and motherboard fan speeds through fixed modules when PawnIO is installed.\n\nOther programs running as a standard user under this account can use these operations too, which effectively gives the account some administrator rights. Install it only on an account that you use yourself. The service starts with Windows. Installing requires administrator permission; the service can be uninstalled in Settings later.",
       "action": "Install and enable"
     },
     "uninstall": {
@@ -187,7 +192,20 @@
     "start": "Start service",
     "update": "Update service",
     "ready": "The privileged service is ready.",
-    "uninstalled": "The privileged service has been uninstalled."
+    "uninstalled": "The privileged service has been uninstalled.",
+    "broken": {
+      "repair": "Click Repair service to reinstall the service files and reconnect, or click Uninstall to remove the leftover service registration. Both require administrator permission.",
+      "remove": "Click Uninstall to remove the leftover service registration; the service can then be installed again. Uninstalling requires administrator permission.",
+      "notice": "The privileged service is damaged and can't start. See Settings → Permissions.",
+      "view": "View"
+    },
+    "deletePending": "The service has been uninstalled. Windows removes its registration once other programs close their handles to it. Close programs that show the service, such as the Services console, then refresh the status; restarting Windows also completes the removal.",
+    "repair": {
+      "title": "Repair the privileged service?",
+      "body": "The authorization record is lost, so the account that the service was authorized for can't be confirmed. Repairing reinstalls the service files and authorizes the service for the current Windows account; an enabled Task Manager replacement is first restored to Windows Task Manager.",
+      "confirm": "Repair and enable",
+      "action": "Repair service"
+    }
   },
   "taskManager": {
     "title": "Replace Task Manager",

@@ -177,18 +177,18 @@ pub fn log_hardware_once(s: &Snapshot) {
         (None, Some(_)) => "cores",
         (None, None) => "none",
     };
+    let clock = hw
+        .cpu_mhz
+        .map_or_else(|| "unavailable".to_owned(), |mhz| format!("{mhz} MHz"));
+    let clocks_read = hw.core_mhz.iter().filter(|mhz| **mhz > 0).count();
     log::info!(
-        "cpu: model=\"{}\"; family={}; model_id={}; stepping={}; {} logical; temperature: {temperature}; RAPL power: {power}; clock: {}",
+        "cpu: model=\"{}\"; family={}; model_id={}; stepping={}; {} logical; temperature: {temperature}; RAPL power: {power}; clock: {clock}; per-processor clocks: {clocks_read}/{}",
         hardware_label(&hw.cpu.name),
         hw.cpu.family,
         hw.cpu.model,
         hw.cpu.stepping,
         hw.cpu.logical,
-        if hw.core_mhz.is_empty() {
-            "total only"
-        } else {
-            "per processor"
-        },
+        hw.cpu.logical,
     );
     for (index, g) in hw.gpus.iter().enumerate() {
         let power = if g.board_power.is_some() {
@@ -208,7 +208,7 @@ pub fn log_hardware_once(s: &Snapshot) {
             "none"
         };
         log::info!(
-            "gpu: {}; model=\"{}\"; temperature: {}; power: {power}; clock: {}; intel_integrated={}; kernel_sensor_supported={}",
+            "gpu: {}; model=\"{}\"; temperature: {}; power: {power}; clock: {}; intel_integrated={}; kernel_sensor_supported={}; low_power={}",
             index,
             hardware_label(&g.info.name),
             if g.temperature.is_some() {
@@ -219,6 +219,7 @@ pub fn log_hardware_once(s: &Snapshot) {
             if g.clock_mhz.is_some() { "yes" } else { "none" },
             g.info.intel_integrated,
             g.kernel_sensor_supported,
+            g.low_power,
         );
     }
     log::info!(
@@ -278,17 +279,22 @@ pub fn log_privileged_state() {
         }
         match argus_service::status() {
             Ok(s) => log::info!(
-                "privileged service: {}{}{}{}",
+                "privileged service: {}{}{}{}{}",
                 s.state,
+                // What a registered service lacks of its files.
+                s.damage
+                    .map(|damage| format!(" ({})", damage.log()))
+                    .unwrap_or_default(),
                 match &s.version {
                     Some(v) if v == env!("CARGO_PKG_VERSION") => " (same release version)",
                     Some(_) => " (other version)",
                     None => "",
                 },
-                if s.authorized || s.state == "notInstalled" {
-                    ""
-                } else {
+                // Only where the authorization record was read and says so.
+                if s.other_owner() {
                     ", authorized for another account"
+                } else {
+                    ""
                 },
                 argus_service::status_issue(&s)
                     .map(|issue| format!(", error: {issue}"))

@@ -27,25 +27,28 @@
 | `meta.rs` | 在后台线程解析文件描述、公司名和图标（PNG），按路径缓存；普通路径使用外壳图标，`GLOBALROOT` 等扩展路径通过 `SHDefExtractIconW` 读取可执行文件资源。结合系统组件目录与版本资源识别 Windows 组件，不在采样线程重复读取文件。应用包的名称由另一后台线程解析（外壳每个应用约 10–50 ms，不拖慢图标），按包版本与应用缓存。每分钟检查一次空闲条目，超过 10 分钟的路径和包版本随其独占图标回收；内容相同的图标共用一份 PNG。显示中的快照持有 PNG 引用，暂停和隐藏后仍可显示原图标；回收后的图标 ID 永不复用 |
 | `package.rs` | 读取 MSIX 包的 AUMID、包全名和本地化显示名。用清单的 `Executable` 识别应用主进程，其他进程保留各自的文件描述。名称解析最多等待 3 秒 |
 | `webview.rs` | 识别其他应用启动的 WebView2 进程。按父进程、创建时间、会话和运行时路径归组，按实例缓存解析结果。启动参数读取失败最多尝试三次，快照仅包含宿主名称、图标和进程角色 |
-| `system.rs` | 总 CPU 与每个逻辑处理器的 CPU（均含内核时间）、内存、提交、缓存。以标准权限查询 `SystemMemoryListInformation`，取得已修改页、各优先级的备用页、空闲与已清零页；内存组成按互不重叠的页列表显示，已缓存为备用与已修改之和。查询不可用时显示总量，组成明细留空 |
+| `system.rs` | 总 CPU 与每个逻辑处理器的 CPU（均含内核时间）、内存、提交、缓存。以标准权限查询 `SystemMemoryListInformation`，取得已修改页、各优先级的备用页、空闲与已清零页；内存组成按互不重叠的页列表显示，已缓存为备用与已修改之和。查询不可用时显示总量，组成明细留空。已压缩内存以标准权限查询 `SystemStoreInformation` 的 `MemCompressionInfoRequest`（版本 3，Windows 10 起）：驻留量取进程列表中内存压缩进程的工作集（应答里的工作集字段为 32 位，超过 4 GiB 会回绕），存储的数据量按存储区的压缩比估算 |
 | `cpu.rs` | 按处理器组读取独立空闲计数与周期计数，校验处理器时钟与原生计数的单位、连续性和分母；异常时重新建立基线或回退时间计数 |
 | `details.rs` | 按需查询单个进程：命令行、用户、完整性级别、架构、优先级、版本 |
-| `services.rs` | 通过服务控制管理器（SCM）：一次 `EnumServicesStatusExW` 取得全部服务状态；启动类型、路径、描述每个服务要三次 RPC，所以缓存起来偶尔刷新；名称与描述按界面语言从 MUI 读取；启停服务、修改启动类型 |
-| `startup.rs`、`startup/packaged.rs` | 注册表 Run 键、启动文件夹（解析 .lnk）与当前账户的应用包启动任务；传统项目使用 `StartupApproved`，应用包结合 AppModel 注册状态、首次激活与用户授权标记判断是否启用，并记录禁用时间。显示程序名称和应用包本地化名称，保留原始项目标识；包清单与名称按包版本、位置和清单修改时间缓存，状态每次重新读取 |
+| `services.rs` | 通过服务控制管理器（SCM）：一次 `EnumServicesStatusExW` 取得全部服务状态；启动类型、路径、描述每个服务要三次 RPC，所以缓存起来偶尔刷新；名称与描述按界面语言从 MUI 读取；启停服务、修改启动类型、删除服务（运行中的服务由 Windows 在停止后移除） |
+| `startup.rs`、`startup/packaged.rs` | 注册表 Run 键、启动文件夹（解析 .lnk）与当前账户的应用包启动任务；传统项目使用 `StartupApproved`，应用包结合 AppModel 注册状态、首次激活与用户授权标记判断是否启用，并记录禁用时间。显示程序名称和应用包本地化名称，保留原始项目标识；包清单与名称按包版本、位置和清单修改时间缓存，状态每次重新读取。删除传统项目时删去 Run 值或把启动文件夹中的文件移到回收站（不显示任何确认或错误界面），并清除其 `StartupApproved` 记录；应用包启动任务不删除 |
 | `connections.rs` | TCP / UDP（IPv4 / IPv6）端点与所属进程（`netstat -ano` 显示的内容）；断开 IPv4 TCP 连接 |
 | `filelock.rs` | 以当前账户权限通过 Restart Manager 查找打开文件或加载 DLL 的进程。整批查询被拒时二分重试，隔离无法检查的文件 |
 | `handles.rs` | 按需枚举系统 File 句柄，复制后用 `NtQueryObject` 查询类型与名称，以文件 ID 匹配文件（含硬链接）、以路径边界匹配目录及其后代。只在辅助进程运行，流式报告进度与匹配项 |
 | `actions.rs` | 结束进程 / 进程树、设置优先级、I/O 优先级（`ProcessIoPriority`，仅非常低、低与正常）与内存优先级（`ProcessMemoryPriority`）、开关效率模式（EcoQoS 加低优先级，与系统任务管理器相同）、暂停与恢复进程（`NtSuspendProcess`／`NtResumeProcess`，各调用一次，并等待至多 250 ms 确认线程状态）：都先校验 PID 与启动时间，防止 PID 被复用；结束和暂停时拦截关键系统进程，暂停时另拒绝 `dwm.exe` 与 Argus 特权服务；Windows 冻结的进程（`PROCESS_EXTENDED_BASIC_INFORMATION` 的 IsFrozen，如后台的应用包）两个方向都拒绝 |
 | `gpu_process.rs` | 每进程 GPU：每次采样一个 PDH 查询，读出各引擎占用；只统计性能页列出的适配器，计数器同样覆盖的 Microsoft Basic Render Driver（以 CPU 渲染）等不计入，没有这类适配器时不建立查询。计数器出现枚举未返回的 LUID 时（驱动更新后适配器以新 LUID 重启，或之后接入的显卡），`collector.rs` 重新枚举适配器，至多每 10 秒一次，性能页与进程页从下一次采样起随之更新；启动时没有显卡则不建立查询，之后接入的显卡在重启 Argus 后显示。显存使用 `GPU Process Memory` 的 `Local Usage` / `Non Local Usage` 驻留计数，按 PID、完整 LUID 与物理适配器去重，区分缺失和零值；统一内存（集成）适配器的 local 组包含共享的系统内存，`hardware/gpu.rs` 按 `KMTQAITYPE_GETSEGMENTGROUPSIZE` 的 non-local 容量为零识别，这类适配器只把不超过 `Dedicated Usage`（已提交量）的部分计为专用，其余计为共享；除最忙引擎外保留非零节点贡献及完整身份，供应用与分类汇总使用 |
 | `disk_process.rs` | 优先复用普通进程信息中的磁盘计数尾部，旧系统回退完整进程信息的扩展记录，按 PID、创建时间和来源采样时间换算速率；逐条检查扩展线程数组与磁盘记录边界，不读取字符串及账户数据。Windows 10 的完整记录尾部按 UTF-16 对齐，数值按字节解码，以兼容未按 8 字节对齐的后续记录。普通尾部需同时通过系统版本、返回长度及图像名称边界校验；完整信息查询由管理员宿主的后台读取器或特权服务执行 |
+| `power.rs` | 估算每个进程的电源使用情况，单位为一个持续忙碌的逻辑处理器：CPU 占用折算为忙碌的逻辑处理器数，最忙 GPU 引擎满载计 4 个单位，磁盘读写每 512 MiB/s 计 1 个单位、至多 1.5 个单位（与驱动器满速时的功耗相当，进程的磁盘计数可在单个区间内报告驱动器达不到的速率）；界面在 0.1、0.3、0.8、2 个单位处分出非常低至非常高五级，应用分组取成员之和。趋势为约两分钟内（12 个 10 秒分段）按采样间隔加权的平均值，同一进程实例累计满 10 秒后提供；沿用的旧读数与新进程的首个读数不计入。宿主的采样线程在补齐特权服务提供的磁盘速率之后计算。Windows 未公开任务管理器同名列的权重与分级，这些数值由 Argus 设定，表示相对水平而非瓦数 |
 | `net_process.rs` | 每进程网络：优先使用独立 GUID 的私有系统 ETW 会话，仅启用 `NETWORK_TCPIP`；系统会话不可用时回退到 `Microsoft-Windows-Kernel-Network`。按提供者区分事件 ID 与操作码，解析 TCP / UDP、IPv4 / IPv6 收发字节，排除重传和复制事件。本地与服务客户端随采样周期换算速率，最短统计窗口为 0.5 秒，容许 50 ms 的调度与 IPC 抖动，并校验进程实例。快速采样时，独立线程每 250 ms 将事件送入实时消费者；最近 1.5 秒没有快速读取时停止额外刷新，采用 ETW 自身的一秒刷新定时器。关闭会话前先停止刷新线程。服务通过 `take_bytes` 维护多读者的累计计数。启动会话需要相应权限；GUI 与服务保留独立会话名，清理各自残留会话。日志记录选用的来源，并在启动后 5 秒及后续每 30 秒检查 ETW 丢失计数 |
 | `rules.rs` | 规则引擎：按程序名匹配，新进程出现时套用一次；`apply_with` 允许宿主后台线程选择本地或服务执行器，规则或权限来源改变时重新检查。分别统计已应用、权限不足和其他执行失败的次数 |
-| `history.rs` | 历史记录：把采样按 5 秒一帧汇总（CPU 平均值与最高值、内存、磁盘与网络吞吐量、最忙的 GPU、电池电量与充放电功率，以及 CPU、内存、I/O、GPU、网络各自最高的几个进程），没有采样的 5 秒不写帧（后台刷新间隔长于 5 秒时帧随之变稀），追加写入每天（UTC）一个的二进制文件，保留 7 天。每帧整块写入并刷新，重新打开时截掉崩溃留下的半帧；进程名在文件内只写一次。读取侧按时间范围分桶汇总（空桶不输出，曲线上留出断档），或取离某一时刻最近的一帧；另有占用统计、清除和过期清理。每次采样约 30 µs，每帧约 460 字节 |
+| `history.rs` | 将系统读数和资源占用靠前的进程汇总为五秒帧，按 UTC 日保存，保留七天。采样空档在曲线上留白。重开时检查主文件与进程明细的提交边界，截去断尾。曲线和区间进程表使用有效汇总，缺失或损坏时读取原始帧。支持按时间查找最近一帧、统计占用、清除及过期清理。最近十分钟的样本通过不可变快照供查询线程读取。 |
 | `pdh.rs` | PDH 查询的薄封装，`sensors.rs` 与 `gpu_process.rs` 共用 |
 | `privilege.rs` | Argus 自身的提权状态、启用 SeDebugPrivilege、提高自身优先级 |
 | `theme.rs` | 系统个性化颜色（强调色） |
 | `i18n.rs` | 原生层的文案：编译时嵌入 `locales/*/native.json`，`tr!` 按当前语言查找；进程级语言默认取父进程通过 `ARGUS_LOCALE` 传入的值，否则为 Windows 显示语言，宿主再按设置覆盖 |
 | `nt.rs` | `windows` crate 没有（完整）提供的原生结构，布局按 phnt 头文件的 x64 版本 |
+
+历史曲线单次最多查询 100,000 个时间桶，区间进程表每行最多 4,096 个趋势点。正常退出和启动更新安装程序后的退出路径均给采样线程两秒保存末帧。若采集仍阻塞，宿主继续退出，尚未提交的末帧可能丢失。
 
 ## 进程附加计数
 
@@ -68,33 +71,46 @@
 | 模块 | 职责 |
 |---|---|
 | `cpu.rs` | 型号、拓扑（每个逻辑处理器属于哪个核心，是性能核、能效核还是低功耗能效核）、缓存、虚拟化 |
-| `sensors.rs` | 在标准权限下通过 PDH 批量读取 CPU 频率、ACPI 温度和可用功耗计数。频率优先使用 `Actual Frequency` 的 MHz 读数，缺少总项时对完整逻辑处理器读数求均值；单路同类核心才使用基准频率与性能百分比回退。功耗按域合计多个封装的有效读数，保留有效零值，过滤缺失、负数和非有限值 |
+| `clock.rs` | 在标准权限下通过 Windows PCW 读取 CPU 整体和各逻辑处理器的原始频率计数。按实例配对连续样本，处理 32 位基数回绕及实例替换 |
+| `sensors.rs` | 合并 CPU 频率读数，使用 PDH 采集 ACPI 温度、空闲驻留时间和功耗。PCW 与 PDH 查询独立。已启用内核传感器时，可用物理核心时钟补齐对应线程。功耗按域合计多个封装的有效读数，保留有效零值，过滤缺失、负数和非有限值 |
 | `battery.rs` | 电池类驱动 IOCTL：电量、充放电功率、电压、设计 / 完全充电容量、循环次数。标准用户可以只读打开电池设备 |
 | `memory.rs` | 解析 SMBIOS（类型 17）中的内存条：速度、插槽、外形规格、DDR 代数 |
-| `disk.rs` | 以 `FILE_ANY_ACCESS` 存储 IOCTL 查询型号、容量、介质、卷及温度，通过 `IOCTL_DISK_PERFORMANCE` 计算活动时间、传输速率和响应时间。温度只向 NVMe、SATA 与 ATA 总线上的磁盘查询 |
+| `disk.rs` | 以 `FILE_ANY_ACCESS` 存储 IOCTL 查询型号、容量、介质、卷及温度，通过 `IOCTL_DISK_PERFORMANCE` 计算活动时间、传输速率和响应时间。温度只向由 `stornvme`、`storahci`、`atapi` 管理的 NVMe、SATA 与 ATA 磁盘查询，驱动名由 `disk/controller.rs` 取自 PnP 设备树。温度查询是周期采样中唯一到达磁盘本身的请求：`GetDevicePowerState` 报告磁盘不在工作状态时不发送并清除读数，恢复工作后查询一次；机械硬盘只在 `IOCTL_DISK_PERFORMANCE` 的读写次数较上次查询有变化时发送，空闲时保留上次读数 |
 | `disk/access.rs` | 缓存句柄注册 PnP 移除通知；在弹出请求中关闭句柄、暂停访问，取消弹出后重新打开并变更采样代次；通知不可用时使用查询期间的临时句柄 |
 | `disk/volumes.rs` | 物理计数接口不支持时读取卷层计数；在同一卷句柄上验证磁盘归属，按提供者与设备编号去重并独立维护基线，单卷提供活动时间，多卷合计速率与加权响应时间 |
 | `disk_details.rs`、`disk_details/` | 磁盘详情的单次只读查询：基本身份、扇区、TRIM、NVMe 控制器身份与健康日志、PCIe 链路、Windows 故障预测；现有特权服务补充 ATA／SAT 身份与 SMART 属性、SCSI 健康日志。只由前端明确请求触发，结果与周期采样分离 |
 | `net.rs` | 网络适配器：接口表（`GetIfTable2`）取吞吐量，`GetAdaptersAddresses` 取地址 |
-| `gpu.rs` | 通过 D3DKMT 查询节点计时、显存和性能数据。逐节点维护计时基线，查询失败或计数重置后重建，可选的性能查询间隔 5 秒重试。枚举时记下不列出的适配器（软件渲染、仅显示、仅计算）；重新枚举时仍存在的适配器保留句柄与计时基线，枚举失败则保持原列表。占用率结合有效的进程引擎读数与 NVIDIA 核心利用率，并注明来源。PCI 地址用于匹配厂商设备 |
+| `gpu.rs` | 通过 D3DKMT 查询节点计时、显存和性能数据。逐节点维护计时基线，查询失败或计数重置后重建，可选的性能查询间隔 5 秒重试；性能数据由显卡驱动回答，每次采样是否查询由 `gpu/power.rs` 决定。枚举时记下不列出的适配器（软件渲染、仅显示、仅计算）；重新枚举时仍存在的适配器保留句柄与计时基线，枚举失败则保持原列表。占用率结合有效的进程引擎读数与 NVIDIA 核心利用率，并注明来源。PCI 地址用于匹配厂商设备 |
 | `gpu/metadata.rs` | 枚举时一次性读取驱动版本、INF 驱动日期和 DirectX 能力，保存在共享的 `GpuInfo` 中。PnP 属性与 DXGI 适配器均按完整 LUID 匹配；Direct3D 12 使用空设备输出探测最高功能级别，失败时查询 Direct3D 11。缺失字段保持未知，周期采样复用结果 |
-| `vendor_gpu/` | AMD ADL2 PMLog / Overdrive 与 Intel IGCL 电源域及设备遥测，独立线程加载 System32 库、读取数据；容量为 1 的请求队列，最短 500 ms 采集间隔，过期缓存不进入快照。IGCL 温度、频率、电压及芯片能量不依赖电源域枚举；逐项校验支持标记、单位、类型与范围，有效零值保留，失败后间隔 5 秒重试。`ControlLib.dll` 加载后固定在进程中直至退出：它注册的 ETW 提供程序不随 `ctlClose` 和卸载注销，卸载后一旦有跟踪会话启用该提供程序，系统就会调用已卸载的回调，进程崩溃 |
+| `gpu/power.rs` | 决定每次采样是否访问显卡驱动。由驱动回答的查询（D3DKMT 适配器与节点性能数据、NVML、ADL、IGCL）会唤醒已断电的适配器，持续发送则使它无法断电。适配器类型带 `HybridDiscrete` 或 `RuntimePowerManagement` 标志，或曾处于 D0 以外的电源状态时：设备不在 D0 则不查询，驱动读数缺省并置 `low_power`；节点计时显示本次间隔内有工作量，或驱动上次报告的核心利用率不为零，则每次采样查询；通电但空闲时每 20 秒查询一次，其间沿用上次读数。其余适配器每次采样查询，每 5 秒核对一次电源状态。电源状态取自 PnP 设备节点的 `DEVPKEY_Device_PowerData`，读取不经过设备，每次约 0.2 ms（i5-13500HX、RTX 4060 Laptop GPU）。节点计时与显存统计由图形内核维护，不受上述限制 |
+| `vendor_gpu/` | AMD ADL2 PMLog / Overdrive 与 Intel IGCL 电源域及设备遥测，独立线程加载 System32 库、读取数据，每轮只查询采样线程按 `gpu/power.rs` 的判断指定的适配器；容量为 1 的请求队列，最短 500 ms 采集间隔，过期缓存不进入快照。IGCL 温度、频率、电压及芯片能量不依赖电源域枚举；逐项校验支持标记、单位、类型与范围，有效零值保留，失败后间隔 5 秒重试。`ControlLib.dll` 加载后固定在进程中直至退出：它注册的 ETW 提供程序不随 `ctlClose` 和卸载注销，卸载后一旦有跟踪会话启用该提供程序，系统就会调用已卸载的回调，进程崩溃 |
 | `kernel_sensors.rs` | 与特权服务共享的固定 CPU 传感器快照；枚举定义的功耗、电压、电流、时钟和限制，每个物理核心的读数、SMU 状态及主板风扇、电源轨和温度，另有可选的核显温度、频率与 VID。宿主按开关异步补充；核显字段与 PP1 功耗仅映射到单插槽 Intel 系统中 PCI `0:2:0` 上唯一的 Intel 适配器，与显卡驱动提供的读数按来源合并 |
-| `nvml.rs` | NVIDIA 板卡功耗、功耗上限及可选的 GPU 核心利用率：只从 System32 加载驱动附带的 `nvml.dll`，按 PCI 位置匹配，不支持或无效的读数不参与补充。核心利用率用于覆盖部分驱动原生节点计时遗漏的 CUDA 等负载，不替代单独的 Windows 引擎曲线 |
+| `nvml.rs` | NVIDIA 板卡功耗、功耗上限及可选的 GPU 核心利用率：只从 System32 加载驱动附带的 `nvml.dll`，按 PCI 位置匹配，不支持或无效的读数不参与补充。初始化会唤醒全部 NVIDIA 适配器，因此推迟到首个 NVIDIA 适配器允许查询时加载。核心利用率用于覆盖部分驱动原生节点计时遗漏的 CUDA 等负载，不替代单独的 Windows 引擎曲线 |
 
 CPU 虚拟化状态优先使用 Windows 的可用标志；Hyper-V 或 VBS 占用虚拟化扩展时，结合 `Hv#1` 接口的 `CreatePartitions` 权限识别宿主。普通虚拟机客体继续按其可用的虚拟化扩展判断。权限位定义见 [Hyper-V 分区权限](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/datatypes/hv_partition_privilege_mask)。
 
-CPU 动态频率的回退基准来自 CPUID 或 Windows 电源接口；注册表 `~MHz` 可表示 TSC／参考时钟，已退出动态频率换算。混合架构由拓扑类别及 [CPUID Hybrid 标志](https://www.intel.com/content/www/us/en/developer/articles/guide/12th-gen-intel-core-processor-gamedev-guide.html)共同识别，避免在类别未由 Windows 拓扑 API 暴露时套用统一基准。Windows 把 Intel 的能效核与低功耗能效核（LP E-core）归入同一效率类别，两者按三级缓存区分：低功耗能效核不在其余核心共享的三级缓存之内。这与 Intel 针对 Meteor Lake 给出的[判断方法](https://community.intel.com/t/detecting-lp-e-cores-on-meteor-lake-in-software/121766)（CPUID.1A 的核心类型为 Atom 且 CPUID.4 没有三级缓存）使用同一依据，改为读取 `GetLogicalProcessorInformationEx` 的缓存拓扑，无需把线程逐一绑到各处理器执行 CPUID；仅用于 Intel 处理器，其他厂商的紧凑核心保持为能效核。频率计数使用 `PDH_FMT_NOCAP100` 保留睿频比例，仍校验 PDH 状态、数值范围及处理器组对应关系；其他计数器保持原有格式。
+Windows 10 22H2 的 `Processor Information` 提供第 33、34 号计数器，其英文名称目录缺少 `Actual Frequency`。该版本的任务管理器按编号查询 PCW，取两次采样的 `Δ33 / Δ34` 得到 MHz。Argus 使用相同来源和算法，优先采用 `_Total` 的整体读数。逻辑处理器实例名中的两个数字分别为 NUMA 节点编号和节点内序号，通过缓存的节点亲和掩码映射到核心拓扑。[Windows PCW 机制](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/kernel-mode-performance-monitoring) · [Windows NUMA 拓扑接口](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlogicalprocessorinformationex)
+
+打开 PCW 查询失败时，可使用 PDH 的具名直接读数。缺失项还可按逻辑处理器的标称频率和 `% Processor Performance` 换算。标称 MHz 来自 `PowerInternalProcessorBrandedFrequency` 或 `PROCESSOR_POWER_INFORMATION.MaxMhz`，单路同类核心还可使用 CPU 基准速度。采样通过 `PDH_FMT_NOCAP100` 保留睿频比例。所有换算基准一致时可使用系统总百分比，基准不同时对完整的逻辑处理器 MHz 读数求均值。[phnt 性能域查询结构](https://github.com/winsiderss/systeminformer/blob/952a0e7a4efb45b5e1acc4c733916684a7803406/phnt/include/ntpoapi.h#L3052-L3085) · [Windows 处理器电源信息](https://learn.microsoft.com/en-us/windows/win32/power/processor-power-information-str)
+
+核心类型优先取自 `GetLogicalProcessorInformationEx` 的 `EfficiencyClass`。若 Windows 仅报告一种类别，而 Intel 处理器带有 Hybrid 标志，采集器在枚举拓扑时用独立线程按处理器组绑定到每个物理核心，读取 `CPUID.1A.0:EAX[31:24]`。其中 `0x40` 对应性能核，`0x20` 对应能效核。全部物理核心的类型均已识别时才采用这组结果，同核的逻辑处理器共用类型。[Intel 混合架构开发指南](https://www.intel.com/content/www/us/en/developer/articles/guide/12th-gen-intel-core-processor-gamedev-guide.html)
+
+Intel 的能效核与低功耗能效核（LP E-core）可属于同一效率类别。采集器使用 Windows 报告的三级缓存拓扑，在性能核有三级缓存时，将三级缓存覆盖范围之外的 Intel 能效核标为低功耗能效核。该判断沿用 Intel 对 Meteor Lake 的说明，其他厂商的紧凑核心按能效核显示。[Intel 对 LP E-core 的说明](https://community.intel.com/t/detecting-lp-e-cores-on-meteor-lake-in-software/121766)
 
 周期采样的设备句柄通过 [CM_Register_Notification](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_register_notification) 注册移除事件。弹出回调等待当前查询或重开操作完成，关闭句柄后返回成功；取消弹出只更新状态，由采样线程重新打开设备并重置计数基线。通知注销在拥有句柄的线程执行，等待回调退出后释放上下文，遵循 [CM_Unregister_Notification](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_unregister_notification) 的生命周期要求。
 
 卷层回退沿用零访问权限句柄。每次读取先以 `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` 核对唯一物理磁盘，再查询计数；`PARTMGR`／`PhysDisk` 的物理结果还须匹配磁盘编号，卷结果接受 Windows 的 `VOLMGR`／`FTDISK`／`DMIO`／`LogiDisk` 提供者。范围依据 [DISK_PERFORMANCE](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntdddisk/ns-ntdddisk-_disk_performance) 的提供者和设备身份判断。临时卷句柄在父磁盘的查询保护期间打开并关闭，移除应答会等待其结束；不持有额外的长期卷句柄，不调用 diskperf 或改写计数器的注册表配置。
 
-磁盘的型号、介质、容量、卷映射与性能计数由 Windows 的类驱动、分区管理器和 Storport 应答。温度查询（`StorageDeviceTemperatureProperty`）与 NVMe 协议查询交给存储控制器的微型端口驱动处理，请求没有超时，发出后用户态无法取消。RAID 类控制器（Intel RST、VMD 及厂商 RAID）将其后的磁盘都呈现为 RAID 总线，系统盘通常也在其中：[Intel RST 17.5 上已有该温度查询不返回、Windows 随之停止响应直至断电重启的报告](https://github.com/boykopovar/AnyPS5/pull/16061)，Intel 在 [RST 18.6.1.1016 的已解决问题](https://downloadmirror.intel.com/773229/Release_Notes_18_7_6_1010_3_enduser_PV.pdf)中列有“NVMe IOCTL 在 D3 状态下发送后不完成”。因此温度只向 NVMe、SATA 与 ATA 总线上的磁盘查询，磁盘详情不向 RAID 总线发送 NVMe 协议查询；其余总线上的磁盘温度保持未知。
+磁盘的型号、介质、容量、卷映射与性能计数由 Windows 的类驱动、分区管理器和 Storport 应答。温度查询（`StorageDeviceTemperatureProperty`）与 NVMe 协议查询交给存储控制器的微型端口驱动处理，请求没有超时，发出后用户态无法取消。厂商的存储驱动（Intel RST、VMD 及厂商 NVMe、RAID 驱动）通常同时管理系统盘，在这两类请求上出过两种故障：
+
+- **请求不返回**。[Intel RST 17.5 上已有该温度查询不返回、Windows 随之停止响应直至断电重启的报告](https://github.com/boykopovar/AnyPS5/pull/16061)，Intel 在 [RST 18.6.1.1016 的已解决问题](https://downloadmirror.intel.com/773229/Release_Notes_18_7_6_1010_3_enduser_PV.pdf)中列有“NVMe IOCTL 在 D3 状态下发送后不完成”。
+- **内核内存被写坏**。Intel RST VMD 20.1 与 20.2（`iaStorVD`）处理设备级 NVMe 协议查询时，写到 Storport 交给它的缓冲区之外，破坏内核池，数秒到数十秒内以 `0x139`（参数 1 为 `0x1D`）蓝屏，故障模块每次不同。[其他厂商的后台程序发出同一查询时也有相同调用栈的报告](https://learn.microsoft.com/en-us/answers/questions/5957604/kernel-security-check-failure-139)。
+
+磁盘报告的总线类型不能区分这类磁盘：RST VMD 直通的 NVMe 磁盘报告的就是 NVMe 总线。因此是否发送按磁盘的控制器驱动判断。`disk/controller.rs` 从 PnP 设备树读取磁盘父设备的驱动服务名：温度只向 `stornvme`、`storahci` 与 `atapi` 之上的 NVMe、SATA、ATA 磁盘查询；NVMe 协议查询只发给 `stornvme`，以及 USB 存储驱动（`USBSTOR`、`UASPStor`）之上的桥接设备。其他驱动之上或读不到驱动名的磁盘，温度与 NVMe 健康信息保持未知。每块磁盘的总线、驱动名和是否查询温度在首次发现时写入诊断日志。
 
 ## 磁盘详情接口
 
-宿主命令 `disk_details` 接受 `{ "index": 0 }`，调用 `argus_service::disk_details(index)`，按 `PhysicalDrive` 编号返回 `DiskDetails`。先以本地零访问权限句柄调用 `hardware::disk_details::query(index)`；ATA、SATA、USB、SCSI、SAS、RAID 设备再通过已运行的特权服务补充读取。每次请求读取一份新的 SMART 数据，完成后关闭句柄。磁盘温度和活动率另由周期采样维护。
+宿主命令 `disk_details` 接受 `{ "index": 0 }`，调用 `argus_service::disk_details(index)`，按 `PhysicalDrive` 编号返回 `DiskDetails`。宿主在发出读取前写入标记文件，上次会话在读取后异常结束时不再自动读取，见[原生宿主](host.md)。先以本地零访问权限句柄调用 `hardware::disk_details::query(index)`；ATA、SATA、USB、SCSI、SAS、RAID 设备再通过已运行的特权服务补充读取。每次请求读取一份新的 SMART 数据，完成后关闭句柄。磁盘温度和活动率另由周期采样维护。
 
 设备以零访问权限打开，通过 Windows 存储属性查询读取；PCIe 参数通过匹配物理磁盘编号的 PnP 设备树取得，只采用最近 PCI 控制器节点的属性。使用系统现有权限，设备或驱动拒绝时返回对应状态。
 
@@ -110,7 +126,7 @@ CPU 动态频率的回退基准来自 CPUID 或 Windows 电源接口；注册表
 | `ataHealth` | 已适配 ATA/SATA 设备的温度与运行计数；SSD 的剩余寿命、累计读写、异常断电、不可校正错误及可用备用空间；HDD 的启停、磁头加载、重映射／待映射／离线不可校正扇区与接口 CRC 计数；同时返回介质类别和读数对应的原始属性编号。从现有属性派生，无额外设备查询 |
 | `queriedAt`、`queries` | 请求开始时的 Unix 毫秒时间戳；各查询的 `ready`、`unsupported`、`accessDenied`、`unavailable`、`invalidData` 状态及原始 Win32 错误码 |
 
-NVMe 使用标准 Identify Controller 和健康日志，覆盖开放该接口的各厂商设备。原生 NVMe 优先采用控制器级属性，失败或数据无效时回退至设备级属性；以 SCSI／USB 总线呈现且未确认为机械盘的设备，以及未知总线的已确认 SSD，仅尝试设备级属性，以保持查询对应当前物理磁盘。RAID 总线上的设备不发送 NVMe 协议查询，依据见 [hardware/](#hardware) 一节。成功后跳过 ATA/SCSI 健康补充。返回的 `scope` 为 `controller` 或 `device`；同一控制器的多个命名空间可能共享计数。
+NVMe 使用标准 Identify Controller 和健康日志，覆盖开放该接口的各厂商设备。原生 NVMe（控制器驱动为 `stornvme`）优先采用控制器级属性，失败或数据无效时回退至设备级属性；USB 存储驱动之上以 SCSI／USB 总线呈现且未确认为机械盘的设备，以及未知总线的已确认 SSD，仅尝试设备级属性，以保持查询对应当前物理磁盘。其他存储驱动之上的磁盘不发送 NVMe 协议查询，依据见 [hardware/](#hardware) 一节。成功后跳过 ATA/SCSI 健康补充。返回的 `scope` 为 `controller` 或 `device`；同一控制器的多个命名空间可能共享计数。
 
 128 位累计计数序列化为十进制字符串，保留全部精度。NVMe 读写数据单位按每单位 512,000 字节换算，原始计数同时返回；乘法溢出时换算值为 `null`。温度保留开尔文原值并提供摄氏度值，未报告的传感器保留槽位。寿命估计取 `max(0, 100 - percentageUsed)`，严重警告位独立返回，前端应分别展示。序列号只进入显式请求的详情结果，不写入诊断日志或周期快照。
 

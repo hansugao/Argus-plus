@@ -31,6 +31,16 @@
       "e": "E-コア",
       "lp": "LP E-コア"
     },
+    "view": {
+      "overall": "全体表示",
+      "logical": "マルチコア表示"
+    },
+    "filter": {
+      "all": "すべてのコア",
+      "p": "P-コアのみ",
+      "e": "E-コアのみ",
+      "lp": "LP E-コアのみ"
+    },
     "filterAll": "すべて",
     "filterTitle": {
       "all": "すべての論理プロセッサを表示",
@@ -271,6 +281,7 @@
     "sub": "{used} / {total} GB（{percent}%）",
     "usage": "メモリ使用量",
     "legendInUse": "使用中 {value}",
+    "legendCompressed": "圧縮 {value}",
     "legendModified": "変更済み {value}",
     "legendStandby": "スタンバイ {value}",
     "legendFree": "空き {value}",
@@ -278,7 +289,10 @@
     "modifiedDescription": "別の目的で使用する前に内容をディスクに書き込む必要があるメモリ",
     "standbyDescription": "キャッシュされたデータとアクティブに使用されていないコードを含むメモリ",
     "freeDescription": "現在使用されておらず、プロセス、ドライバー、またはオペレーティング システムがより多くのメモリを必要とするときに最初に再利用されるメモリ",
+    "compressedDescription": "プロセスのページを圧縮した形で保持するメモリ。使用中のメモリに含まれます",
+    "compressedSaving": "圧縮メモリには推定 {stored} のデータが格納されており、システムのメモリを {saved} 節約しています",
     "inUse": "使用中",
+    "inUseCompressed": "使用中（圧縮）",
     "available": "利用可能",
     "committed": "コミット済み",
     "cached": "キャッシュ済み",
@@ -320,6 +334,12 @@
     "readAt": "読み取り時刻 {time}",
     "loading": "ディスク情報を読み込み中…",
     "unavailable": "ディスクの詳細がありません。",
+    "held": {
+      "title": "自動読み取りを停止中",
+      "reason": "前回ディスクの詳細を読み取った後、Argus が正常に終了しませんでした。Windows のクラッシュ、電源断、または Argus プロセスの強制終了が発生した可能性があります。起動のたびに問題が繰り返されないよう、このページを開いても自動では読み取りません。",
+      "note": "読み取りでは、ストレージ ドライバーに読み取り専用のクエリを送信します。読み取り後、Argus がしばらく正常に動作し続けると、自動読み取りが再開されます。再び異常終了した場合は、次回の起動時にもこの説明が表示されます。",
+      "read": "それでも読み取る"
+    },
     "openFailed": "このディスクを開けませんでした。",
     "errorCode": "Windows エラーコード {code}",
     "health": "正常性",
@@ -566,6 +586,9 @@
       "rows": "一覧"
     },
     "maxCoreClock": "最大コアクロック",
+    "powerState": "電源状態",
+    "lowPower": "スリープ中",
+    "lowPowerHint": "GPU はアイドル状態で、低電力状態に入っています。温度、ファン、クロック、電圧、消費電力を読み取ると GPU が復帰するため、読み取りを停止しています。GPU の使用が再開されると再び表示されます。",
     "powerSource": "消費電力の取得元",
     "sources": {
       "nvml": "NVIDIA NVML・ボード",

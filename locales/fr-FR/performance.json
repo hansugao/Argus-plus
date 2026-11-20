@@ -35,6 +35,16 @@
       "e": "Cœurs E",
       "lp": "Cœurs LP E"
     },
+    "view": {
+      "overall": "Vue globale",
+      "logical": "Vue multicœur"
+    },
+    "filter": {
+      "all": "Tous les cœurs",
+      "p": "Cœurs P uniquement",
+      "e": "Cœurs E uniquement",
+      "lp": "Cœurs LP E uniquement"
+    },
     "filterAll": "Tous",
     "filterTitle": {
       "all": "Afficher tous les processeurs logiques",
@@ -279,6 +289,7 @@
     "sub": "{used} / {total} GB ({percent} %)",
     "usage": "Utilisation de la mémoire",
     "legendInUse": "En cours d’utilisation {value}",
+    "legendCompressed": "Compressée {value}",
     "legendModified": "Modifiée {value}",
     "legendStandby": "Veille {value}",
     "legendFree": "Libre {value}",
@@ -286,7 +297,10 @@
     "modifiedDescription": "Mémoire dont le contenu doit être écrit sur le disque avant de pouvoir être utilisé à d’autres fins",
     "standbyDescription": "Mémoire contenant des données mises en cache et du code qui n’est pas activement utilisé",
     "freeDescription": "Mémoire qui n’est pas actuellement utilisée et qui sera réutilisée en premier lorsque les processus, les pilotes ou le système d’exploitation auront besoin de plus de mémoire",
+    "compressedDescription": "Mémoire qui conserve des pages de processus sous forme compressée, comptée dans la mémoire utilisée",
+    "compressedSaving": "La mémoire compressée stocke environ {stored} de données, ce qui fait économiser {saved} de mémoire au système",
     "inUse": "Utilisée",
+    "inUseCompressed": "Utilisée (compressée)",
     "available": "Disponible",
     "committed": "Validée",
     "cached": "En cache",
@@ -328,6 +342,12 @@
     "readAt": "Lecture à {time}",
     "loading": "Lecture des informations sur le disque…",
     "unavailable": "Aucun détail sur le disque.",
+    "held": {
+      "title": "Lecture automatique suspendue",
+      "reason": "Argus ne s’est pas fermé normalement après la dernière lecture des détails du disque. Windows a peut-être planté, l’alimentation a peut-être été coupée ou le processus Argus a été arrêté. Pour que le problème ne se répète pas à chaque démarrage, cette page ne lit plus automatiquement à l’ouverture.",
+      "note": "La lecture envoie des requêtes en lecture seule au pilote de stockage. Si Argus continue de fonctionner normalement pendant un certain temps après une lecture, la lecture automatique reprend. Si Argus se ferme de nouveau anormalement, cet avis s’affichera au prochain démarrage.",
+      "read": "Lire quand même"
+    },
     "openFailed": "Ce disque n’a pas pu être ouvert.",
     "errorCode": "Code d’erreur Windows {code}",
     "health": "État de santé",
@@ -578,6 +598,9 @@
       "rows": "Liste"
     },
     "maxCoreClock": "Fréquence maximale du cœur",
+    "powerState": "État d’alimentation",
+    "lowPower": "En veille",
+    "lowPowerHint": "Le GPU est inactif et dans un état de faible consommation. Lire la température, le ventilateur, la fréquence, la tension et la puissance le réveillerait. Ces mesures sont donc suspendues et s’affichent de nouveau dès que le GPU est utilisé.",
     "powerSource": "Source de la mesure de puissance",
     "sources": {
       "nvml": "NVIDIA NVML · carte",

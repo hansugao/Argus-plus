@@ -322,8 +322,92 @@ fn lenient_metrics<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Reading
     Ok(readings)
 }
 
+/// An order of metrics as saved: ones this version does not know and
+/// repeats are left out, keeping the rest.
+fn lenient_order<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Metric>, D::Error> {
+    let mut order = Vec::new();
+    if let serde_json::Value::Array(names) = serde_json::Value::deserialize(d)? {
+        for name in names {
+            if let Ok(metric) = serde_json::from_value::<Metric>(name)
+                && !order.contains(&metric)
+            {
+                order.push(metric);
+            }
+        }
+    }
+    Ok(order)
+}
+
 /// The window opacities the desktop monitor offers, percent.
 pub const MONITOR_OPACITIES: [u8; 5] = [100, 90, 80, 70, 60];
+
+/// Settings stored by name: a name this version does not know reads as the
+/// default.
+macro_rules! named {
+    ($(#[$meta:meta])* $name:ident { $($(#[$variant_meta:meta])* $variant:ident = $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+        #[serde(from = "String", into = "String")]
+        pub enum $name {
+            $($(#[$variant_meta])* $variant),+
+        }
+
+        impl From<String> for $name {
+            fn from(name: String) -> Self {
+                match name.as_str() {
+                    $($text => $name::$variant,)+
+                    _ => $name::default(),
+                }
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                match value {
+                    $($name::$variant => $text,)+
+                }
+                .into()
+            }
+        }
+    };
+}
+
+named! {
+    /// How the desktop monitor lays its readings out.
+    DeskLayout {
+        /// A panel of groups, one device's readings to a group.
+        #[default]
+        Panel = "panel",
+        /// One line along a screen edge, wrapping between groups where the
+        /// display is too narrow.
+        Strip = "strip",
+    }
+}
+
+named! {
+    /// How the desktop monitor's panel shows a group.
+    DeskStyle {
+        /// Names, bars and values.
+        #[default]
+        List = "list",
+        /// Names and values beside the group's recent curve.
+        Curves = "curves",
+        /// A tile a group, a ring for its first reading.
+        Gauges = "gauges",
+    }
+}
+
+named! {
+    /// How the panel's list and curves set one group apart from the next.
+    DeskGrouping {
+        #[default]
+        Cards = "cards",
+        /// A strip in the device's colour before each group.
+        Stripes = "stripes",
+        /// A line between groups.
+        Rules = "rules",
+    }
+}
 
 /// The desktop monitor: a small window of live readings that stays on the
 /// desktop outside the main window.
@@ -334,6 +418,17 @@ pub struct DesktopMonitor {
     /// What it shows, in this order.
     #[serde(deserialize_with = "lenient_metrics")]
     pub metrics: Vec<Reading>,
+    /// How the kinds of reading (CPU, memory, GPU, disk, network, the rest)
+    /// and each kind's metrics were arranged on the components page: the
+    /// kinds in the order of their first metrics here. Metrics it leaves
+    /// out go after the others of their kind, in the order offered
+    /// (`Metric::ALL`); empty, everything is in that order. `metrics`
+    /// keeps to it.
+    #[serde(deserialize_with = "lenient_order")]
+    pub order: Vec<Metric>,
+    pub layout: DeskLayout,
+    pub style: DeskStyle,
+    pub grouping: DeskGrouping,
     /// It stays above other windows.
     pub topmost: bool,
     /// It cannot be dragged.
@@ -361,6 +456,10 @@ impl Default for DesktopMonitor {
             ]
             .map(Reading::from)
             .to_vec(),
+            order: Vec::new(),
+            layout: DeskLayout::default(),
+            style: DeskStyle::default(),
+            grouping: DeskGrouping::default(),
             topmost: true,
             locked: false,
             click_through: false,
@@ -448,8 +547,8 @@ impl From<TaskbarStyle> for String {
 #[serde(from = "String", into = "String")]
 pub enum TaskbarSize {
     Small,
-    Medium,
     #[default]
+    Medium,
     Large,
 }
 
@@ -459,7 +558,7 @@ impl TaskbarSize {
         match self {
             TaskbarSize::Small => 0.85,
             TaskbarSize::Medium => 1.,
-            TaskbarSize::Large => 1.25,
+            TaskbarSize::Large => 1.1,
         }
     }
 }
@@ -493,6 +592,9 @@ pub struct TaskbarMonitor {
     /// What it shows, in this order.
     #[serde(deserialize_with = "lenient_metrics")]
     pub metrics: Vec<Reading>,
+    /// How its readings were arranged, as the desktop monitor's `order`.
+    #[serde(deserialize_with = "lenient_order")]
+    pub order: Vec<Metric>,
     pub place: TaskbarPlace,
     pub style: TaskbarStyle,
     /// The text's size, for every style.
@@ -503,6 +605,11 @@ pub struct TaskbarMonitor {
     /// Values in their reading's colour rather than the taskbar's own, in
     /// the labels style; the other styles colour their values anyway.
     pub colored: bool,
+    /// The display whose taskbar it sits on, by what keeps that display
+    /// apart across restarts (its monitor's device path); empty for the
+    /// primary display, whichever that is. While that display is away or
+    /// shows no taskbar, it sits on the primary display's.
+    pub display: String,
 }
 
 impl Default for TaskbarMonitor {
@@ -512,11 +619,13 @@ impl Default for TaskbarMonitor {
             metrics: [Metric::Cpu, Metric::Memory, Metric::Network]
                 .map(Reading::from)
                 .to_vec(),
+            order: Vec::new(),
             place: TaskbarPlace::default(),
             style: TaskbarStyle::default(),
             size: TaskbarSize::default(),
             rows: 2,
             colored: true,
+            display: String::new(),
         }
     }
 }
@@ -925,12 +1034,23 @@ mod tests {
         assert!(newer.desktop_monitor.topmost);
         assert!(newer.taskbar_monitor.enabled);
         assert!(newer.taskbar_monitor.metrics.is_empty());
+        assert!(newer.desktop_monitor.order.is_empty() && newer.taskbar_monitor.order.is_empty());
         assert_eq!(newer.taskbar_monitor.place, TaskbarPlace::Tray);
+        // An arrangement keeps the metrics it knows, each once.
+        let arranged: Settings = serde_json::from_str(
+            r#"{"taskbarMonitor": {"order": ["disk", "fps", "cpuPower", "disk", 3, "cpu"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            arranged.taskbar_monitor.order,
+            [Metric::Disk, Metric::CpuPower, Metric::Cpu]
+        );
         assert_eq!(newer.taskbar_monitor.style, TaskbarStyle::Labels);
         // Settings without the later appearance fields show the defaults.
-        assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Large);
+        assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Medium);
         assert_eq!(newer.taskbar_monitor.rows, 2);
         assert!(newer.taskbar_monitor.colored);
+        assert!(newer.taskbar_monitor.display.is_empty());
         let styled: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "figures"}}"#).unwrap();
         assert_eq!(styled.taskbar_monitor.style, TaskbarStyle::Figures);
@@ -943,13 +1063,44 @@ mod tests {
         assert!(!sized.taskbar_monitor.colored);
         let unnamed: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"size": "huge"}}"#).unwrap();
-        assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Large);
+        assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Medium);
         let capsules: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "capsules"}}"#).unwrap();
         assert_eq!(capsules.taskbar_monitor.style, TaskbarStyle::Capsules);
         let unknown: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "neon"}}"#).unwrap();
         assert_eq!(unknown.taskbar_monitor.style, TaskbarStyle::Labels);
+        // The desktop monitor's look: a panel of cards in a list unless
+        // saved otherwise; names it does not know read as those.
+        assert_eq!(
+            (
+                newer.desktop_monitor.layout,
+                newer.desktop_monitor.style,
+                newer.desktop_monitor.grouping
+            ),
+            (DeskLayout::Panel, DeskStyle::List, DeskGrouping::Cards)
+        );
+        let look: Settings = serde_json::from_str(
+            r#"{"desktopMonitor": {"layout": "strip", "style": "gauges", "grouping": "rules"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                look.desktop_monitor.layout,
+                look.desktop_monitor.style,
+                look.desktop_monitor.grouping
+            ),
+            (DeskLayout::Strip, DeskStyle::Gauges, DeskGrouping::Rules)
+        );
+        let strange: Settings = serde_json::from_str(
+            r#"{"desktopMonitor": {"layout": "ring", "style": "3d", "grouping": "boxes"}}"#,
+        )
+        .unwrap();
+        assert_eq!(strange.desktop_monitor, DesktopMonitor::default());
+        assert_eq!(
+            serde_json::to_value(&look.desktop_monitor).unwrap()["grouping"],
+            "rules"
+        );
         // A monitor that does not read at all keeps the other settings.
         let mut edited: Settings = serde_json::from_str(
             r#"{"desktopMonitor": {"opacity": "half"}, "taskbarMonitor": 3, "closeToTray": false}"#,
@@ -970,6 +1121,10 @@ mod tests {
             desktop_monitor: DesktopMonitor {
                 enabled: true,
                 metrics: Metric::ALL.map(Reading::from).to_vec(),
+                order: vec![Metric::Disk, Metric::DiskTemperature, Metric::Cpu],
+                layout: DeskLayout::Strip,
+                style: DeskStyle::Curves,
+                grouping: DeskGrouping::Stripes,
                 topmost: false,
                 locked: true,
                 click_through: true,
@@ -985,11 +1140,14 @@ mod tests {
                     )
                     .unwrap(),
                 ],
+                order: vec![Metric::Network, Metric::Memory],
                 place: TaskbarPlace::Start,
                 style: TaskbarStyle::Curves,
                 size: TaskbarSize::Large,
                 rows: 1,
                 colored: false,
+                display: r"\\?\DISPLAY#ACM0001#5&1&UID4353#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
+                    .into(),
             },
             ..Settings::default()
         };

@@ -27,6 +27,16 @@
       "e": "能效核",
       "lp": "低功耗能效核"
     },
+    "view": {
+      "overall": "整体视图",
+      "logical": "多核视图"
+    },
+    "filter": {
+      "all": "全部核心",
+      "p": "仅性能核",
+      "e": "仅能效核",
+      "lp": "仅低功耗能效核"
+    },
     "filterAll": "全部",
     "filterTitle": {
       "all": "显示所有逻辑处理器",
@@ -263,6 +273,7 @@
     "sub": "{used} / {total} GB（{percent}%）",
     "usage": "内存使用量",
     "legendInUse": "使用中 {value}",
+    "legendCompressed": "已压缩 {value}",
     "legendModified": "已修改 {value}",
     "legendStandby": "备用 {value}",
     "legendFree": "空闲 {value}",
@@ -270,7 +281,10 @@
     "modifiedDescription": "内容必须先写入磁盘才能用于其他用途的内存",
     "standbyDescription": "包含未频繁使用的缓存数据和代码的内存",
     "freeDescription": "当前未使用但会在进程、驱动程序或操作系统需要更多内存时首先重新使用的内存",
+    "compressedDescription": "以压缩形式保存进程页面的内存，属于使用中的内存",
+    "compressedSaving": "压缩内存估计存储了 {stored} 的数据，为系统节省了 {saved} 内存",
     "inUse": "使用中",
+    "inUseCompressed": "使用中（已压缩）",
     "available": "可用",
     "committed": "已提交",
     "cached": "已缓存",
@@ -309,6 +323,12 @@
     "readAt": "读取于 {time}",
     "loading": "正在读取磁盘信息…",
     "unavailable": "暂无磁盘详情。",
+    "held": {
+      "title": "已暂停自动读取",
+      "reason": "上次读取磁盘详情后，Argus 未正常退出，可能发生了系统崩溃、断电或进程被强制结束。为避免问题在每次启动时重现，打开此页时不再自动读取。",
+      "note": "读取会向存储驱动发送只读查询。读取后 Argus 继续正常运行一段时间，自动读取即恢复；再次异常退出时，下次启动仍显示本说明。",
+      "read": "仍要读取"
+    },
     "performanceUnavailable": "暂时无法读取磁盘性能计数。",
     "volumeCounters": "当前使用卷 {volumes} 的性能统计，统计范围为该卷。",
     "volumeCountersMultiple": "当前汇总卷 {volumes} 的读写速率和响应时间；活动时间暂无可用读数。",
@@ -554,6 +574,9 @@
       "rows": "列表"
     },
     "maxCoreClock": "最高核心频率",
+    "powerState": "电源状态",
+    "lowPower": "已休眠",
+    "lowPowerHint": "GPU 空闲，已进入低功耗状态。读取温度、风扇、频率、电压与功耗会将其唤醒，因此暂不读取；GPU 恢复工作后继续显示。",
     "powerSource": "功耗来源",
     "sources": {
       "nvml": "NVIDIA NVML · 板卡",

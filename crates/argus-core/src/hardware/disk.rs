@@ -1,6 +1,7 @@
 //! Physical disks: identity via storage IOCTLs, activity via IOCTL_DISK_PERFORMANCE.
 //! Device presence is independent of performance counter support.
 mod access;
+pub(super) mod controller;
 mod discovery;
 #[cfg(test)]
 mod tests;
@@ -21,6 +22,7 @@ use windows::Win32::System::Ioctl::{
     STORAGE_TEMPERATURE_DATA_DESCRIPTOR, StorageDeviceProperty, StorageDeviceSeekPenaltyProperty,
     StorageDeviceTemperatureProperty, VOLUME_DISK_EXTENTS,
 };
+use windows::Win32::System::Power::GetDevicePowerState;
 use windows::core::PCWSTR;
 
 use crate::util::{AlignedBuf, wide};
@@ -44,18 +46,21 @@ pub(super) fn bus_name(code: u32) -> &'static str {
         _ => "other",
     }
 }
-/// Buses on which a disk is asked for its temperature.
+/// Whether a disk is asked for its temperature: by its bus, and by the driver
+/// that serves it (`controller`, a service name from the PnP tree).
 ///
 /// Storport hands `StorageDeviceTemperatureProperty` to the adapter's miniport
 /// driver, and nothing in user mode can cancel a request the miniport never
 /// completes. Microsoft's NVMe and AHCI miniports answer or decline at once.
-/// RAID-class miniports (Intel RST and VMD, vendor RAID) serve every disk
-/// behind them, the system disk included: an Intel RST release has been seen
-/// to leave the request for an NVMe drive pending forever, which stalls the
-/// controller and with it Windows until the PC is powered off. Disks on every
-/// other bus therefore report no temperature rather than risk that.
-pub(super) fn temperature_query_allowed(bus: &str) -> bool {
-    matches!(bus, "nvme" | "sata" | "ata")
+/// Vendor miniports (Intel RST and VMD, vendor RAID) serve every disk behind
+/// them, the system disk included: an Intel RST release has been seen to leave
+/// the request for an NVMe drive pending forever, which stalls the controller
+/// and with it Windows until the PC is powered off. The bus type does not tell
+/// such a disk apart: Intel RST VMD presents the NVMe drives it passes through
+/// as NVMe. A disk on another bus, behind another driver, or behind one PnP
+/// does not name therefore reports no temperature rather than risk that.
+pub(super) fn temperature_query_allowed(bus: &str, controller: Option<&str>) -> bool {
+    matches!(bus, "nvme" | "sata" | "ata") && controller::answers_temperature(controller)
 }
 const DRIVE_REMOVABLE: u32 = 2;
 const DRIVE_FIXED: u32 = 3;
@@ -68,6 +73,8 @@ const LEGACY_PROBE_DISKS: u32 = 32;
 #[serde(rename_all = "camelCase")]
 pub struct DiskInfo {
     pub index: u32,
+    #[serde(skip)]
+    pub(crate) history_id: String,
     /// Empty when the drive does not report one.
     pub model: String,
     pub size: u64,
@@ -104,6 +111,8 @@ struct Disk {
     handle: Option<DeviceHandle>,
     generation: u64,
     info: Arc<DiskInfo>,
+    /// Service name of the driver that serves the disk, when PnP names it.
+    controller: Option<String>,
     prev: Option<DISK_PERFORMANCE>,
     fallback: volumes::Counters,
     fallback_reported: bool,
@@ -111,27 +120,35 @@ struct Disk {
     temperature: Option<(f32, Option<f32>)>,
     temperature_at: Option<Instant>,
     temperature_supported: bool,
+    /// Read and write counts at the last temperature query; None before one.
+    temperature_transfers: Option<(u32, u32)>,
 }
 
 impl Disk {
-    fn new(handle: Option<DeviceHandle>, info: DiskInfo) -> Self {
+    fn new(handle: Option<DeviceHandle>, info: DiskInfo, controller: Option<String>) -> Self {
         Self {
             handle,
             generation: 0,
-            temperature_supported: temperature_query_allowed(info.bus),
+            temperature_supported: temperature_query_allowed(info.bus, controller.as_deref()),
             info: Arc::new(info),
+            controller,
             prev: None,
             fallback: volumes::Counters::default(),
             fallback_reported: false,
             temperature: None,
             temperature_at: None,
+            temperature_transfers: None,
         }
     }
 
+    fn temperature_allowed(&self) -> bool {
+        temperature_query_allowed(self.info.bus, self.controller.as_deref())
+    }
+
     /// Lets a drive that declined the temperature query be asked again, only
-    /// on the buses where the query is sent at all.
+    /// where the query is sent at all.
     fn arm_temperature(&mut self) {
-        self.temperature_supported = temperature_query_allowed(self.info.bus);
+        self.temperature_supported = self.temperature_allowed();
         if !self.temperature_supported {
             self.temperature = None;
         }
@@ -149,6 +166,22 @@ impl Disk {
         read: impl FnOnce(HANDLE) -> Result<DISK_PERFORMANCE, u32>,
         temperature: impl FnOnce(HANDLE) -> Option<(f32, Option<f32>)>,
     ) -> Option<DISK_PERFORMANCE> {
+        self.sample_with_power(read, temperature, working)
+    }
+
+    /// The temperature query is the only request here that reaches the
+    /// miniport driver and the drive itself. Like any command sent to a drive,
+    /// it starts one that has powered down and counts as activity towards the
+    /// idle time after which Windows turns a hard disk off. A drive that is
+    /// not in its working state is therefore not asked, and a hard disk is
+    /// asked only after transfers that others caused: an idle one keeps its
+    /// last reading and can spin down.
+    fn sample_with_power(
+        &mut self,
+        read: impl FnOnce(HANDLE) -> Result<DISK_PERFORMANCE, u32>,
+        temperature: impl FnOnce(HANDLE) -> Option<(f32, Option<f32>)>,
+        working: impl FnOnce(HANDLE) -> bool,
+    ) -> Option<DISK_PERFORMANCE> {
         let handle = self.handle.as_ref()?;
         let result = handle.read(|raw, generation| {
             if self.generation != generation {
@@ -156,25 +189,40 @@ impl Disk {
                 self.prev = None;
                 self.fallback.clear();
                 self.temperature_at = None;
-                self.temperature_supported = temperature_query_allowed(self.info.bus);
+                self.temperature_transfers = None;
+                // Field by field: the closure must not borrow all of `self`.
+                self.temperature_supported =
+                    temperature_query_allowed(self.info.bus, self.controller.as_deref());
             }
+            // The counters come from the partition manager, not the drive.
+            let now = read(raw);
             if self.temperature_supported
                 && self
                     .temperature_at
                     .is_none_or(|t| t.elapsed() > TEMPERATURE_EVERY)
             {
-                // The only request here that reaches the miniport driver:
-                // leave a durable record before it when startup is traced.
-                self.temperature = crate::diagnostics::startup_query(
-                    "hardware.disk-temperature",
-                    u64::from(self.info.index),
-                    0,
-                    || temperature(raw),
-                );
-                self.temperature_supported = self.temperature.is_some();
                 self.temperature_at = Some(Instant::now());
+                let transfers = now.as_ref().ok().map(|p| (p.ReadCount, p.WriteCount));
+                if !working(raw) {
+                    self.temperature = None;
+                    // Awake again, it is asked once whatever woke it.
+                    self.temperature_transfers = None;
+                } else if self.info.ssd != Some(false)
+                    || transfers.is_none()
+                    || transfers != self.temperature_transfers
+                {
+                    // Leave a durable record before it when startup is traced.
+                    self.temperature = crate::diagnostics::startup_query(
+                        "hardware.disk-temperature",
+                        u64::from(self.info.index),
+                        0,
+                        || temperature(raw),
+                    );
+                    self.temperature_supported = self.temperature.is_some();
+                    self.temperature_transfers = transfers;
+                }
             }
-            read(raw)
+            now
         });
         match result {
             Ok(now) => Some(now),
@@ -225,8 +273,14 @@ impl DiskTracker {
             .filter(|index| *index <= 4095)
             .collect();
         for index in indices {
+            // The interface names the driver that serves the disk even when
+            // its handle is not the one kept.
+            let (interface, controller, path) = match discovered.remove(&index) {
+                Some(found) => (Some(found.handle), found.controller, found.path),
+                None => (None, None, String::new()),
+            };
             let opened = DeviceHandle::open(&format!(r"\\.\PhysicalDrive{index}"))
-                .or_else(|code| discovered.remove(&index).ok_or(code));
+                .or_else(|code| interface.ok_or(code));
             let handle = match opened {
                 Ok(handle) => Some(handle),
                 Err(code) => {
@@ -244,7 +298,7 @@ impl DiskTracker {
                 }
             };
             let vols = volumes.get(&index).cloned().unwrap_or_default();
-            let (info, geometry_error) = match &handle {
+            let (mut info, geometry_error) = match &handle {
                 Some(handle) => handle
                     .read(|raw, _| Ok(describe(raw, index, vols.clone())))
                     .unwrap_or_else(|_| (unknown_disk(index, vols), None)),
@@ -252,6 +306,7 @@ impl DiskTracker {
                     DiskInfo {
                         index,
                         model: String::new(),
+                        history_id: String::new(),
                         size: 0,
                         bus: "other",
                         ssd: None,
@@ -261,6 +316,9 @@ impl DiskTracker {
                     None,
                 ),
             };
+            if !path.is_empty() {
+                info.history_id = path;
+            }
             if no_media(&info, geometry_error) {
                 continue;
             }
@@ -282,14 +340,16 @@ impl DiskTracker {
                 if *d.info != info {
                     d.info = Arc::new(info);
                 }
+                d.controller = controller;
                 d.arm_temperature();
                 self.disks.push(d);
                 continue;
             }
-            let disk = Disk::new(handle, info);
-            if disk.handle.is_some() && matches!(disk.info.bus, "raid" | "scsi" | "sas") {
-                // Answers "why is there no temperature" for an internal drive.
-                log::info!(target: "argus::disk", "disk temperature is not queried on this bus; disk={}; bus={}", disk.info.index, disk.info.bus);
+            let disk = Disk::new(handle, info, controller);
+            if disk.handle.is_some() {
+                // Names the storage driver in a report, and answers "why is
+                // there no temperature" for an internal drive.
+                log::info!(target: "argus::disk", "disk: {}; bus={}; storage driver={}; temperature query: {}", disk.info.index, disk.info.bus, controller::label(disk.controller.as_deref()), if disk.temperature_supported { "yes" } else { "no" });
             }
             self.disks.push(disk);
         }
@@ -446,6 +506,7 @@ fn unknown_disk(index: u32, volumes: Vec<String>) -> DiskInfo {
     DiskInfo {
         index,
         model: String::new(),
+        history_id: String::new(),
         size: 0,
         bus: "other",
         ssd: None,
@@ -544,6 +605,14 @@ fn query_property(
     Ok((buf, returned))
 }
 
+/// Whether the drive is in its working state (D0), as the power manager
+/// records it; no request is sent to the drive. An unknown state counts as
+/// working.
+fn working(handle: HANDLE) -> bool {
+    let mut on = windows::core::BOOL(1);
+    !unsafe { GetDevicePowerState(handle, &mut on) }.as_bool() || on.as_bool()
+}
+
 /// The drive's composite temperature and warning threshold (°C).
 fn temperature(handle: HANDLE) -> Option<(f32, Option<f32>)> {
     let (buf, returned) = query_property(handle, StorageDeviceTemperatureProperty).ok()?;
@@ -570,6 +639,7 @@ fn describe(handle: HANDLE, index: u32, mut volumes: Vec<String>) -> (DiskInfo, 
     let mut info = DiskInfo {
         index,
         model: String::new(),
+        history_id: String::new(),
         size: 0,
         bus: "other",
         ssd: None,
@@ -600,6 +670,7 @@ fn describe(handle: HANDLE, index: u32, mut volumes: Vec<String>) -> (DiskInfo, 
                 .map_or(raw.len(), |p| o + p);
             String::from_utf8_lossy(&raw[o..end]).trim().to_owned()
         };
+        info.history_id = string_at(desc.SerialNumberOffset);
         let vendor = string_at(desc.VendorIdOffset);
         let product = string_at(desc.ProductIdOffset);
         let model = if vendor.is_empty() || product.starts_with(&vendor) {

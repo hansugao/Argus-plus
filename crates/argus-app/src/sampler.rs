@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::channel::Channel;
 use argus_core::history::{self, HistoryRecorder};
+use argus_core::power::PowerTracker;
 use argus_core::watch::{WatchAction, WatchError, WatchRecorder, WatchView};
 use argus_core::{Collector, Snapshot};
 use argus_service::{DiskClient, NetworkClient, RuleRunner, SensorClient};
@@ -49,6 +50,7 @@ fn publish_refresh(pending: &mut Option<Instant>, observed: Option<Instant>) -> 
 }
 
 pub enum Control {
+    Shutdown(Sender<()>),
     Subscribe(Channel<Snapshot>),
     SetInterval(Duration),
     /// How often to sample while minimized and while in the tray.
@@ -206,6 +208,7 @@ impl Sampler {
                 let mut network = NetworkClient::spawn();
                 let mut disk = DiskClient::spawn();
                 let mut sensors = SensorClient::spawn();
+                let mut power = PowerTracker::default();
                 let mut kernel_sensors = false;
                 let mut subscriber: Option<Channel<Snapshot>> = None;
                 let mut window: Option<Probe> = None;
@@ -253,13 +256,23 @@ impl Sampler {
                             schedule.restart(cadence(state, paused, interval, minimized, tray));
                             continue;
                         }
+                        Ok(Control::Shutdown(reply)) => {
+                            drop(history);
+                            let _ = reply.send(());
+                            return;
+                        }
                         Ok(Control::Refresh) => true,
                         Ok(Control::SetWindowProbe(probe)) => {
                             window = Some(probe);
                             continue;
                         }
                         Ok(Control::SetHistoryDir(dir)) => {
-                            history = dir.map(HistoryRecorder::new);
+                            if history.as_ref().map(HistoryRecorder::directory) != dir.as_deref() {
+                                if let Some(mut recorder) = history.take() {
+                                    recorder.stop(dir.is_none());
+                                }
+                                history = dir.map(HistoryRecorder::start);
+                            }
                             continue;
                         }
                         Ok(Control::Watch(dir, action, reply)) => {
@@ -320,6 +333,8 @@ impl Sampler {
                     if let Some(failure) = disk.new_failure() {
                         log::warn!("per-process disk I/O unavailable: {failure}");
                     }
+                    let logical_cpus = snapshot.system.logical_cpus;
+                    power.apply(&mut snapshot.processes, logical_cpus, Instant::now());
                     rules.observe(&snapshot.processes);
                     if let Some(recorder) = &mut history {
                         recorder.record(&snapshot);
@@ -347,6 +362,14 @@ impl Sampler {
         Self { tx }
     }
 
+    pub fn shutdown(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send(Control::Shutdown(tx)).is_ok() {
+            // A storage driver can keep the worker inside a query indefinitely.
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
     pub fn send(&self, control: Control) {
         let _ = self.tx.send(control);
     }
@@ -355,6 +378,25 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_returns_while_a_worker_still_holds_the_request() {
+        let (tx, rx) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            Sampler { tx }.shutdown();
+            let _ = done.send(());
+        });
+        let Control::Shutdown(reply) = rx.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("unexpected sampler control");
+        };
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        result.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(reply.send(()).is_err());
+    }
 
     #[test]
     fn paused_action_refresh_survives_cached_rows_and_a_late_pre_action_reply() {

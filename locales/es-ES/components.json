@@ -33,7 +33,7 @@
   },
   "metrics": {
     "title": "Lecturas mostradas",
-    "desc": "Las lecturas elegidas se muestran en el orden siguiente. Con varias GPU, discos o adaptadores de red, se pueden elegir para cada dispositivo. Si no se elige ningún dispositivo, las lecturas de GPU corresponden a la GPU con más memoria dedicada; las velocidades de disco y de red son totales, y la actividad y la temperatura de disco muestran el valor más alto de todos los discos.",
+    "desc": "Las lecturas elegidas se muestran en el orden siguiente, que puede cambiarse arrastrando una categoría o una lectura. Con varias GPU, discos o adaptadores de red, se pueden elegir para cada dispositivo. Si no se elige ningún dispositivo, las lecturas de GPU corresponden a la GPU con más memoria dedicada; las velocidades de disco y de red son totales, y la actividad y la temperatura de disco muestran el valor más alto de todos los discos.",
     "group": {
       "cpu": "CPU",
       "memory": "Memoria",
@@ -57,22 +57,26 @@
     "cpu": {
       "name": "CPU",
       "short": "CPU",
-      "option": "Uso"
+      "option": "Uso",
+      "tag": "Uso"
     },
     "cpuTemperature": {
       "name": "Temperatura de CPU",
       "short": "CPU",
-      "option": "Temperatura"
+      "option": "Temperatura",
+      "tag": "Temp."
     },
     "cpuClock": {
       "name": "Frecuencia de CPU",
       "short": "CPU",
-      "option": "Frecuencia"
+      "option": "Frecuencia",
+      "tag": "Frec."
     },
     "cpuPower": {
       "name": "Potencia de CPU",
       "short": "CPU",
-      "option": "Potencia"
+      "option": "Potencia",
+      "tag": "Pot."
     },
     "memory": {
       "name": "Memoria",
@@ -87,32 +91,38 @@
     "gpu": {
       "name": "GPU",
       "short": "GPU",
-      "option": "Uso"
+      "option": "Uso",
+      "tag": "Uso"
     },
     "gpuTemperature": {
       "name": "Temperatura de GPU",
       "short": "GPU",
-      "option": "Temperatura"
+      "option": "Temperatura",
+      "tag": "Temp."
     },
     "gpuMemory": {
       "name": "Memoria de GPU",
       "short": "VRAM",
-      "option": "Memoria"
+      "option": "Memoria",
+      "tag": "VRAM"
     },
     "gpuClock": {
       "name": "Frecuencia de GPU",
       "short": "GPU",
-      "option": "Frecuencia"
+      "option": "Frecuencia",
+      "tag": "Frec."
     },
     "gpuPower": {
       "name": "Potencia de GPU",
       "short": "GPU",
-      "option": "Potencia"
+      "option": "Potencia",
+      "tag": "Pot."
     },
     "gpuFan": {
       "name": "Ventilador de GPU",
       "short": "Vent.",
-      "option": "Ventilador"
+      "option": "Ventilador",
+      "tag": "Vent."
     },
     "disk": {
       "name": "Disco",
@@ -149,6 +159,26 @@
   "desktop": {
     "title": "Monitor de escritorio",
     "desc": "Muestra las lecturas elegidas en una pequeña ventana del escritorio. Arrástrela para moverla, haga doble clic para abrir Argus o clic derecho para abrir el menú. Mientras está visible, utiliza la «Frecuencia de actualización».",
+    "layout": {
+      "title": "Disposición",
+      "desc": "Un panel muestra las lecturas agrupadas por dispositivo, una debajo de otra; una franja las muestra todas en una fila junto a un borde de la pantalla y salta de línea entre grupos si es demasiado ancha.",
+      "panel": "Panel",
+      "strip": "Franja"
+    },
+    "style": {
+      "title": "Estilo",
+      "desc": "Vista previa de cada estilo del panel con las lecturas elegidas; haga clic en uno para usarlo.",
+      "list": "Lista",
+      "curves": "Curvas",
+      "gauges": "Indicadores"
+    },
+    "grouping": {
+      "title": "Agrupación",
+      "desc": "Cómo los estilos Lista y Curvas separan las lecturas de cada dispositivo.",
+      "cards": "Tarjetas",
+      "stripes": "Franjas de color",
+      "rules": "Divisores"
+    },
     "topmost": {
       "title": "Siempre visible",
       "desc": "Se muestra por encima de las demás ventanas."
@@ -170,21 +200,34 @@
       "topmost": "Siempre visible",
       "locked": "Bloquear posición",
       "settings": "Configuración de componentes…",
-      "hide": "Desactivar el monitor de escritorio"
+      "hide": "Desactivar el monitor de escritorio",
+      "look": "Disposición",
+      "list": "Panel de lista",
+      "curves": "Panel de curvas",
+      "gauges": "Panel de indicadores",
+      "strip": "Franja"
     }
   },
   "taskbar": {
     "title": "Monitor en la barra de tareas",
-    "desc": "Muestra las lecturas elegidas en la barra de tareas de la pantalla principal. Un clic muestra u oculta la ventana; un clic derecho abre un panel para cambiar el estilo y las lecturas mostradas. Mientras está visible, utiliza la «Frecuencia de actualización».",
+    "desc": "Muestra las lecturas elegidas en la barra de tareas. Un clic muestra u oculta la ventana; un clic derecho abre un panel para cambiar el estilo y las lecturas mostradas. Mientras está visible, utiliza la «Frecuencia de actualización».",
     "place": {
       "title": "Posición",
       "desc": "«Lado izquierdo» solo se aplica a la barra de tareas de Windows 11 con los botones centrados. En otros casos, el monitor aparece junto a la bandeja.",
       "tray": "Junto a la bandeja",
       "start": "Lado izquierdo"
     },
+    "display": {
+      "title": "Pantalla",
+      "desc": "La pantalla en cuya barra de tareas aparece el monitor. Si la pantalla elegida no está conectada o no muestra la barra de tareas, el monitor aparece en la pantalla principal.",
+      "primary": "Pantalla principal",
+      "item": "{name} ({width} × {height})",
+      "unnamed": "Pantalla {index}",
+      "absent": "Pantalla desconectada"
+    },
     "style": {
       "title": "Estilo",
-      "desc": "Etiquetas: nombres y valores en dos filas. Curvas: una tarjeta por lectura, con su nombre y su valor sobre su curva reciente. Cápsulas: una cápsula redondeada por lectura en una fila, marcada con un punto del color del dispositivo. Cifras grandes: un nombre pequeño en el color del dispositivo sobre una cifra grande. Las curvas, las cápsulas y las cifras grandes necesitan espacio para dos filas de texto; en una barra de tareas más baja se muestran como etiquetas.",
+      "desc": "Vista previa de cada estilo en la barra de tareas con las dos primeras lecturas elegidas; haga clic en uno para usarlo. Las curvas, las cápsulas y las cifras grandes necesitan espacio para dos filas de texto; en una barra de tareas más baja se muestran como etiquetas.",
       "labels": "Etiquetas",
       "curves": "Curvas",
       "capsules": "Cápsulas",
@@ -216,8 +259,8 @@
   },
   "planned": {
     "state": "Previsto",
-    "island": {
-      "title": "Isla dinámica",
+    "lookout": {
+      "title": "Vigía",
       "desc": "Lecturas en tiempo real y notificaciones en una cápsula en la parte superior de la pantalla."
     }
   },

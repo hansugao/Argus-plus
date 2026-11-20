@@ -16,6 +16,8 @@ Windows 平台层负责 HWND、窗口显隐和系统事件，宿主管理托盘�
 
 Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按窗口 DPI 与界面缩放换算，每次接触分配独立标识。GPUI 负责点按、双击、滑动、惯性与长按；Windows 上未被文本选择或提示认领的长按进入右键菜单路径。失去指针捕获、系统取消、窗口隐藏或失去焦点时取消未完成的接触。前台窗口中的触摸文本输入通过 `InputPane` 请求系统触摸键盘。
 
+窗口按 `WM_NCHITTEST` 消息中的坐标区分标题栏与客户区，触点可独立于系统鼠标光标。对远程转发的指针消息，Windows 平台层优先查询设备类型和输入来源。两者均缺失时，带有主指针、接触和左键标志的按下消息可开始一次手势，后续消息按同一指针 ID 处理。`touch_input` 测试在隐藏窗口中以 150% 界面缩放检查这条路径。
+
 ## 界面验证
 
 `tools/window-probe` 以独立标识、隐藏启动和不激活显示运行测试实例，监视前台变化，仅通过 Windows.Graphics.Capture 捕获目标窗口。模拟快照位于该工具的 fixtures 目录。实机验证可以省略 fixture，保持测试标识与测试模式，关闭规则执行和历史写入。
@@ -55,7 +57,13 @@ Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按�
 
 [`process-suspend.json`](../../tools/window-probe/steps/process-suspend.json) 核对混合暂停状态的应用组菜单、暂停确认、取消与直接恢复，以及深浅主题下的确认文案。模拟快照中的操作由测试入口截断；真实暂停与恢复由采集层的隔离子进程测试验证。
 
+[`delete-entries.json`](../../tools/window-probe/steps/delete-entries.json) 用 `data` 控制换上三个服务与三个启动项，核对右键菜单的“删除”：Argus 自己的特权服务与应用包启动任务不可删除；其余经菜单打开确认框、确认后发出 `delete_service` 或 `delete_startup_item`（`skippedRequest`），再用 `resolve` 模拟成功、标记删除与各类失败，核对通知中的原因，并捕获系统服务与注册表项的确认框。
+
+[`service-damaged.json`](../../tools/window-probe/steps/service-damaged.json) 用 `data` 控制注入特权服务的“已损坏”与“正在移除”状态，核对设置页卡片在授权记录缺失、服务程序缺失和授权给其他账户时的说明与按钮、修复确认框，以及浅色主题、最小窗口加大字号下的排版；用 `resolve` 给出 `privileged_service_status` 的失败结果，核对错误显示在卡片上且不弹出通知；在其他页面读到损坏状态时只提示一次，单击通知中的按钮回到设置页。断言中的标题与通知文字为简体中文，更换 `--language` 时仅用于查看排版。
+
 [`process-facts.json`](../../tools/window-probe/steps/process-facts.json) 核对文件版本、架构、提升状态与命令行列的启用、未知值、应用组共同值、窄窗口和恢复默认列，并捕获深浅主题画面。
+
+[`power-columns.json`](../../tools/window-probe/steps/power-columns.json) 用模拟快照中写定的估算值核对“电源使用情况”与“电源使用情况趋势”：五个等级的文字与底色、应用组的合计、按显示的等级排序（同级按名称、缺少趋势的进程排在最后），并捕获深浅主题与“选择列”对话框。模拟快照不经过采样线程，估算与趋势的计算由 `argus-core` 的 `power` 单元测试覆盖。
 
 [`about-scroll.json`](../../tools/window-probe/steps/about-scroll.json) 检查关于页在 150% 界面缩放、大字号及窗口尺寸变化后的滚动范围与底部可达性，`inspectLayout` 的 `aboutScroll` 字段记录滚动位置和边界。
 
@@ -73,9 +81,15 @@ Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按�
 
 [`tray-flyouts.json`](../../tools/window-probe/steps/tray-flyouts.json) 捕获组件页、悬停卡片与快捷面板（含新版本入口）的深浅主题画面，以及设置页指向组件页的卡片。改用 `--live` 可核对面板中的实时曲线。真实托盘的悬停与右键单击由 Shell 发起，测试实例不创建托盘图标。
 
-[`monitors.json`](../../tools/window-probe/steps/monitors.json) 经测试控制开启桌面监控与任务栏监控，捕获桌面监控窗口与替身任务栏在深浅主题、全部读数、任务栏左侧、曲线、胶囊与大数字样式和 70% 不透明度下的画面，以及组件页的对应分组，在替身任务栏上打开任务栏监控的面板（测试控制 `taskbarPanel`，不取得前台）并捕获深浅主题下的画面，经面板的选项切换样式与读数并核对勾选状态，最后经菜单关闭桌面监控并关闭任务栏监控。测试实例的桌面监控置于层叠底部；任务栏监控附着到测试实例自己的替身任务栏，不接触资源管理器的任务栏。`inspectLayout.monitors` 输出桌面监控是否显示、位置与各行读数，以及任务栏监控在屏幕上的矩形。[`monitor-metrics.json`](../../tools/window-probe/steps/monitor-metrics.json) 在组件页连续单击三个读数选项（间隔 60 ms），核对每次单击都生效、选项以外的画面不变，并录制单击前后的帧；随后用 `sample` 加入第二块显卡，分别勾选一块磁盘、一个网卡与非默认显卡的读数，核对保存的读数顺序与设备键。选项的测试锚点为 `<卡片>-<行>-<读数>`，如 `desktopMetrics-disk-0-diskTemperature`。
+[`monitors.json`](../../tools/window-probe/steps/monitors.json) 经测试控制开启桌面监控与任务栏监控，捕获桌面监控窗口与替身任务栏在深浅主题、全部读数、任务栏左侧、曲线、胶囊与大数字样式和 70% 不透明度下的画面，以及组件页的对应分组，在替身任务栏上打开任务栏监控的面板（测试控制 `taskbarPanel`，不取得前台）并捕获深浅主题下的画面，经面板的选项切换样式与读数并核对勾选状态，最后经菜单关闭桌面监控并关闭任务栏监控。测试实例的桌面监控置于层叠底部；任务栏监控附着到测试实例自己的替身任务栏，不接触资源管理器的任务栏。`inspectLayout.monitors` 输出桌面监控是否显示、位置与各行读数，以及任务栏监控在屏幕上的矩形。[`monitor-metrics.json`](../../tools/window-probe/steps/monitor-metrics.json) 在组件页连续单击三个读数选项（间隔 60 ms），核对每次单击都生效、选项以外的画面不变，并录制单击前后的帧；随后用 `sample` 加入第二块显卡，分别勾选一块磁盘、一个网卡与非默认显卡的读数，核对保存的读数顺序与设备键。选项的测试锚点为 `<卡片>-<行>-<读数>`，如 `desktopMetrics-disk-0-diskTemperature`。最后单击“样式”中的曲线卡片并核对保存的样式，捕获样式卡片四张一排（深浅主题）与窄窗口中两两一排的画面；样式卡片的测试锚点为 `taskbarStyle-<样式>`。[`desk-looks.json`](../../tools/window-probe/steps/desk-looks.json) 以全部读数逐一捕获桌面监控的列表（卡片、色条、分隔线）、曲线、仪表与横条，经右键菜单的测试控制切换样式，单击组件页的样式卡片（锚点 `desktopStyle-<样式>`）并核对保存的样式，捕获深浅主题下的组件页与各样式，最后把保存的位置设在屏幕右下角之外，核对窗口仍在工作区内；`inspectLayout.monitors.desktop` 另输出显示方式、样式、分组、组数、各读数的曲线条数、窗口尺寸与 `onScreen`。模拟快照没有历史采样，曲线用 [`desk-live.json`](../../tools/window-probe/steps/desk-live.json) 以 `--live` 运行查看。
 
-[`tray-reopen.json`](../../tools/window-probe/steps/tray-reopen.json) 在隐藏的主窗口上检查卡片直接切换到快捷面板、再次单击关闭及重新打开，并覆盖关闭窗口动画的情况。`inspectLayout.tray` 同时记录浮窗的原生可见状态与采样状态，确认面板打开时保持前台采样节拍，关闭后恢复后台节拍。
+[`monitor-order.json`](../../tools/window-probe/steps/monitor-order.json) 在组件页按住桌面监控的类别手柄（锚点 `<卡片>-grip-<类别>`，类别整块为 `<卡片>-block-<类别>`）和读数选项拖动，捕获拖动中的画面，核对类别与读数的新顺序及桌面监控显示的各行，并核对拖动后单击选项仍只勾选；随后在任务栏监控的面板中用 `taskbarPanelDrag` 拖动类别名称与读数，再用 `taskbarPanel` 的 `kinds:` 直接排列类别，捕获深浅主题下的组件页与面板。`inspectLayout.monitors` 的 `kinds.desktop`、`kinds.taskbar` 为两个监控的类别顺序，`taskbarMetrics` 为任务栏监控保存的读数。
+
+[`monitor-display.json`](../../tools/window-probe/steps/monitor-display.json) 用 `taskbarDisplays` 换上三台虚构的显示器，测试实例为每台显示器各建一条替身任务栏（主显示器的在最下方并带托盘，其余依次叠在其上方，标题为“Argus taskbar stand-in 2”等），经面板控制把任务栏监控移到第二台显示器的任务栏，核对该显示器断开时暂时显示在主显示器上、重新连接后移回，并捕获组件页的“显示器”卡片与面板中的显示器选择。`inspectLayout.monitors` 的 `taskbarDisplay` 为保存的显示器，`taskbarOn` 为监控实际所在任务栏对应的显示器及是否暂时显示在主显示器上，`displays` 为当前列出的显示器。
+
+[`section-rail.json`](../../tools/window-probe/steps/section-rail.json) 检查组件页与设置页左侧的分组列表：单击分组跳转、滚轮滚动后标记跟随、从托盘设置入口打开时回到托盘分组，核对宽窗口下卡片列不超过 960 px，并捕获深浅主题与窄窗口（不显示列表）的画面。`inspectLayout.sections` 记录两页列表当前标出的分组，`sections.cards` 为两页卡片列最近一次绘制的左边与宽度；分组的测试锚点为 `<页面>-nav-<分组>`，如 `components-nav-taskbar`。
+
+[`tray-reopen.json`](../../tools/window-probe/steps/tray-reopen.json) 在隐藏的主窗口上检查卡片直接切换到快捷面板、再次单击关闭及重新打开、关闭后 150 ms 内再次右键单击仍能打开，指针停留时悬停卡片先等待再打开、停留不足即离开时不打开，并覆盖关闭窗口动画的情况。`inspectLayout.tray` 同时记录浮窗的原生可见状态与采样状态，确认面板打开时保持前台采样节拍，关闭后恢复后台节拍。
 
 [`process-visibility.json`](../../tools/window-probe/steps/process-visibility.json) 注入含 Windows 组件、普通进程及无所属进程连接的样本，核对三种进程视图、连接筛选、设置页规则编辑与小窗口布局。模拟快照实例的 `formValues` 设置已打开表单的输入，随后通过实际键盘路径保存或取消；`inspectLayout.visibility` 输出开关状态与列表中的 PID。
 
@@ -87,11 +101,13 @@ Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按�
 
 [`disk-details-layout.json`](../../tools/window-probe/steps/disk-details-layout.json) 用 `data` 控制注入一块 NVMe 固态硬盘与一块 SATA 机械硬盘的详情，在默认、最小与宽窗口以及 150% 界面缩放加大字号下截取磁盘详情页的顶部与底部，核对 SMART 属性表的分栏、名称换行与数值换行。
 
+[`disk-details-held.json`](../../tools/window-probe/steps/disk-details-held.json) 检查上次会话在读取磁盘详情后异常结束时的详情页：用 `data` 控制把 `diskReadsHeld` 设为真（模拟快照不读取磁盘，也不读写标记文件），核对打开详情页不发出读取、显示说明，单击“仍要读取”后才请求读取，用 `hold` 与 `resolve` 走过读取中与读取完成两种画面，其他磁盘同样等待请求，已打开的说明在恢复自动读取后保留到离开该页，重新打开后自动读取；另截取浅色主题、小窗口加大字号与宽窗口的画面。`inspectLayout.performance.diskDetails` 输出当前详情页的磁盘编号与是否等待请求，`skippedRequest` 记录被模拟快照跳过的 `disk_details` 请求。更换 `--language` 可复核各语言的换行。标记文件的写入、保留与清除由 `cargo test -p argus-app read_marker` 覆盖。
+
 [`star-reminder.json`](../../tools/window-probe/steps/star-reminder.json) 检查 Star 提醒卡片的入场、悬停点亮、两个按钮与设置开关的联动，并覆盖图表之上和浅色主题。测试实例不会自行显示该卡片，由 `starPrompt` 控制触发；`inspectLayout.star` 输出卡片是否显示及提醒是否开启。卡片叠在图表上，只使用纯色矩形、文字和图标，动效均为一次性播放：改动其绘制后，用 `--live` 加 `ARGUS_GPUI_DIAGNOSTICS=1` 在性能页确认没有 `gpu-chart-foreground-reject`。
 
 [`portable-notice.json`](../../tools/window-probe/steps/portable-notice.json) 用 `data` 控制把 `info.portable` 设为免安装版，核对引导第一步的说明卡片与右下角的一次性提示，覆盖图表之上、浅色主题和最小窗口加大字号。测试实例不会自行显示该提示，由 `portableNotice` 控制触发；模拟快照下单击下载入口不打开浏览器。更换 `--language` 可复核各语言的换行。
 
-[`performance-menus.json`](../../tools/window-probe/steps/performance-menus.json) 检查性能页的两个右键菜单：CPU 图表的“显示内核时间”在整体与多核视图间共用，设备列表可隐藏某一项、在“显示的设备”子菜单中逐项勾选并恢复默认显示；另核对隐藏选中项后的选中项、仅剩一项时不可隐藏、从别处打开已隐藏设备时该项回到列表，以及浅色主题。`pointer` 的 `context` 事件在已记录元素上按下并松开右键，CPU 图表区记录为 `cpu-graphs`，设备项记录为 `device-<设备标识>`；`inspectLayout.performance` 输出列表显示的设备、已隐藏设备的标识、选中项、内核时间开关，以及 CPU 总图与第一张逻辑处理器图的序列数。录制过渡时让 `record` 先于触发它的控制一步开始（间隔约 700 ms）：捕获会话建立需要数百毫秒，同一步内发出的控制会在第一帧到达前完成过渡。
+[`performance-menus.json`](../../tools/window-probe/steps/performance-menus.json) 检查性能页的两个右键菜单：CPU 图表的菜单切换整体与多核视图，多核视图下筛选核心类型（整体视图不列出核心类型），“显示内核时间”在两种视图间共用；设备列表可隐藏某一项、在“显示的设备”子菜单中逐项勾选并恢复默认显示；另核对隐藏选中项后的选中项、仅剩一项时不可隐藏、从别处打开已隐藏设备时该项回到列表，以及浅色主题。`pointer` 的 `context` 事件在已记录元素上按下并松开右键，CPU 图表区记录为 `cpu-graphs`，设备项记录为 `device-<设备标识>`；`inspectLayout.performance` 输出列表显示的设备、已隐藏设备的标识、选中项、CPU 视图（`cpuMode`）、生效的核心类型（`coreFilter`）、内核时间开关，以及 CPU 总图与第一张逻辑处理器图的序列数。录制过渡时让 `record` 先于触发它的控制一步开始（间隔约 700 ms）：捕获会话建立需要数百毫秒，同一步内发出的控制会在第一帧到达前完成过渡。
 
 [`device-order.json`](../../tools/window-probe/steps/device-order.json) 检查设备列表的排序：用 `sample` 改写磁盘的盘符后在“按盘符”与“按磁盘编号”间切换，拖动网络适配器到顶部时磁盘顺序不变，拖动磁盘打乱顺序后改为“自定义”，并核对菜单的勾选与“恢复默认顺序”，录制行的让位与滑动。`inspectLayout.performance` 的 `diskOrder` 为磁盘排序方式，`arranged` 为拖动保存的顺序。
 
@@ -99,13 +115,17 @@ Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按�
 
 [`column-widths.json`](../../tools/window-probe/steps/column-widths.json) 检查进程列的自动宽度：宽窗口不出现横向滚动，悬停列边界时显示竖线与提示，拖动列边界后该列保持手动宽度且其他列不变，双击列边界恢复自动宽度，以及“全宽”。`inspectMenu` 核对表头菜单的“自动调整此列宽度”在列未拖动时不可用；`inspect columns` 的 `autoWidth`、`fullWidth` 为文本列多数行与全部行所需的宽度。[`column-widths-stable.json`](../../tools/window-probe/steps/column-widths-stable.json) 在进程树中折叠、展开分支和搜索，检查各列宽度保持不变。
 
+[`list-columns.json`](../../tools/window-probe/steps/list-columns.json) 用 `data` 控制换上一组服务，检查服务页与启动页的列宽：宽窗口与窄窗口下最后一列取剩余宽度、不出现横向滚动，搜索不改变列宽；拖动启动页名称列的边界时命令列随之伸缩，松开后宽度存入 `tableWidths.startup`，把发布者列拖到最宽时命令列停在最小宽度，窗口变窄时拖动过的列让出宽度，双击列边界恢复；另截取 125% 与 150% 界面缩放。在服务页或启动页上，`inspect columns` 输出当前页的列（`page`、`listWidths`，各列的 `maxWidth` 为可拖到的最大宽度），其他页面仍输出进程列。
+
 [`process-order-held.json`](../../tools/window-probe/steps/process-order-held.json) 检查指针悬停时进程表的排序暂停：指针停在列表上时用 `sample` 改变 CPU 读数，行序保持不变；随后双击展开、折叠，以及单击展开按钮，展开的行跟在所属条目之后，其余行不移动；指针移出列表后恢复排序；关闭 `holdOrderOnHover` 偏好后悬停不再保持行序。`inspectLayout.processTree` 的 `titles` 为各行标题，`heldOrder` 表示当前行序与排序结果不同。
 
 [`status-rate.json`](../../tools/window-probe/steps/status-rate.json) 检查状态栏的刷新控件：单击刷新状态打开频率菜单，再次单击收起，1 秒后再单击重新打开；单击右端按钮暂停、继续刷新。暂停按钮以窗口内坐标单击（1400×900 窗口、100% 缩放），用截图核对按钮位置在两种状态下相同。
 
 [`hardware-acceleration.json`](../../tools/window-probe/steps/hardware-acceleration.json) 在设置页单击“硬件加速”开关，核对窗口在运行中换到软件渲染设备、再换回 GPU，并截取两种设备下的设置页、性能页、进程页与托盘快捷面板；两段录制覆盖切换前后的每一帧，用于确认切换期间没有空白画面。`inspectLayout.graphics` 的 `softwareRequested` 为设置所请求的渲染方式，`software` 为窗口实际使用的适配器是否带软件标记。模拟快照下该开关照常执行，只改变测试实例自身的渲染设备与设置文件。步骤需在装有 GPU 的机器上运行，没有 GPU 时两种设置都使用软件适配器。
 
-[`cpu-cores.json`](../../tools/window-probe/steps/cpu-cores.json) 用 `sample` 把 `/hardware/cpu` 换成其他处理器，检查多核视图的排布与核心类型：32 个同类逻辑处理器排成 8 列 4 行，窗口变窄到放不下 8 列时改为留空位的排布；6 性能核 + 8 能效核 + 2 低功耗能效核的处理器显示三种颜色、徽标、筛选项与图例；只有性能核与低功耗能效核的处理器不显示能效核筛选项。`inspectLayout.performance` 的 `coreColumns` 为网格当前的列数，`coreKinds` 为处理器具有的核心类型。列数的预期值按 125% 显示缩放下 2000 × 1318 的客户区写定。
+[`cpu-cores.json`](../../tools/window-probe/steps/cpu-cores.json) 用 `sample` 把 `/hardware/cpu` 换成其他处理器，检查多核视图的排布与核心类型：32 个同类逻辑处理器排成 8 列 4 行，窗口变窄后标题省去频率，再变矮后隐藏标题、网格占用可见区域；6 性能核 + 8 能效核 + 2 低功耗能效核的处理器显示三种颜色、徽标与图例，CPU 图表的右键菜单列出三种核心类型；只有性能核与低功耗能效核的处理器，菜单不列出能效核，此前选中的能效核筛选回到全部核心。`inspectLayout.performance` 的 `coreColumns` 为网格当前的列数，`coreCaption` 为标题显示的内容（`full`、`short` 省去频率、`hidden`），`coreRoom` 为网格宽度、页面不滚动时的可用高度与网格顶端以下的可见高度，`coreKinds` 为处理器具有的核心类型。列数的预期值按 125% 显示缩放下 2000 × 1318 的客户区写定。
+
+[`gpu-low-power.json`](../../tools/window-probe/steps/gpu-low-power.json) 用 `sample` 把模拟快照的显卡改为已断电（`lowPower` 为真，驱动读数为空），核对性能页不显示温度、频率与功耗，规格中出现“电源状态”一行及其悬停说明，并覆盖浅色主题与最小窗口加 20 px 字号；再改回使用中，核对该行消失、读数恢复。
 
 测试控制除页面、主题、对话框等既有项外，还包括：
 
@@ -118,13 +138,18 @@ Windows 触摸屏的 `WM_POINTER` 消息转换为 GPUI `TouchEvent`，坐标按�
 | `pointer` | `{ "at"?, "event", "dx"?, "dy"?, "clicks"? }`：悬停、按下、按住移动或松开，`context` 为右键单击，`double` 为左键双击；`down` 带 `"clicks": 2` 时为双击的第二次按下，可接着按住移动。`at` 为已记录元素、`header:<列>` 或 `row:<行序号>`（当前表格中从 0 起的行）；省略时相对于手势起点，元素在拖动中移动也不影响 |
 | `touch` | `{ "id", "at"?, "fraction"?, "event", "dx"?, "dy"? }`：原始触摸事件，仅模拟快照；`event` 为 `down`、`move`、`up`、`cancel` 或 `tap`。每次接触使用新的 `id`，同一次接触保持不变。`at` 沿用指针锚点，也接受窗口内坐标 `[x,y]` 与 `about-scroll`；`fraction` 指定锚点内的相对位置，默认中心。事件经正式手势识别路径，长按需在 `down` 后等待至少 500 ms |
 | `headerMenu` | 打开某一列的表头菜单 |
-| `inspectMenu` | 输出菜单是否打开、是否持有键盘、当前项与展开的子菜单 |
+| `inspectMenu` | 输出菜单是否打开、是否持有键盘、当前项、展开的子菜单，以及各项的文字（`items`，分隔线为空字符串）、是否不可用（`disabled`）与是否勾选（`checked`） |
 | `passive` | 与 `mouse`、`wheel` 等输入一同发送时只派发该输入，不另行重绘整个窗口；帧跟踪由此反映真实输入触发的重绘范围 |
 | `starPrompt` | 显示 Star 提醒卡片，不受每日一次的限制 |
 | `portableNotice` | 显示免安装版的右下角提示，不受仅一次的限制 |
 | `desktopMonitor`、`taskbarMonitor` | 经组件页使用的 `set_desktop_monitor`、`set_taskbar_monitor` 修改监控设置，如 `{ "enabled": true }`、`{ "metrics": ["cpu", "network"] }`、`{ "opacity": 70 }`；模拟快照下同样执行，只改变测试实例自身的设置与窗口 |
-| `desktopMonitorMenu` | `topmost`、`locked` 或 `hide`：如同在桌面监控的右键菜单中选择该项 |
+| `desktopMonitorMenu` | `topmost`、`locked`、`hide` 或 `look:list` / `look:curves` / `look:gauges` / `look:strip`：如同在桌面监控的右键菜单中选择该项 |
 | `trayFlyout` | `card` 或 `panel`：在主显示器任务栏右侧的假定托盘位置打开悬停卡片或快捷面板，不取得前台；`warm` 提前创建并预排弹出窗口，与托盘图标收到指针移动时相同；其他值关闭两者。测试实例输出 `tray-flyout` 事件：`made` 为创建窗口的耗时，`visible`、`shown` 为从请求到开始淡入、淡入结束的毫秒数，`frames` 为淡入期间绘制的帧数 |
+| `trayHover` | `rest` 或 `leave`：如同 Shell 报告指针停留在托盘图标上或离开，经宿主的同一计时打开或取消悬停卡片（假定托盘位置） |
+| `trayPress` | `true`：记下右键在托盘图标上按下的时刻，与同一步中随后的 `trayFlyout: "panel"` 组成一次右键单击：面板在按下时打开（或因按下而关闭）则关闭，否则打开 |
+| `taskbarPanel` | `open`：在替身任务栏的任务栏监控上方打开其面板，不取得前台；`close` 关闭；`style:<样式>`、`reading:<读数>`、`settings` 或 `hide`：如同在面板中单击对应的控件；`kinds:<类别>,…`、`metrics:<读数>,…`：如同在面板中把类别或一个类别的读数拖成该顺序；`display:<显示器>`：如同在面板中选择该显示器（为空时为主显示器） |
+| `taskbarDisplays` | `[{ "key", "name", "primary", "rect" }, …]`：以测试自己的显示器代替系统的显示器，组件页与面板列出它们，任务栏监控为每台显示器建一条替身任务栏；空数组恢复系统的显示器 |
+| `taskbarPanelDrag` | `[[列表, 部分, 项], [列表, 部分, 项], 比例]`：在任务栏监控的面板中从第一项的中心按下，分八步移到第二项高度的该比例处后松开；类别名称为 `["kinds", "name", <类别>]`，类别整行为 `["kinds", "", <类别>]`，读数为 `["chips/<类别>", <设备标签序号>, <读数>]`；仅模拟快照 |
 
 合成输入经 `window.defer` 派发，控制同时请求一帧，空闲窗口不会把输入留到下一次采样。探针 `crop`、`sheet` 子命令也可单独使用；开始新的录制时，上一段录制在后台写出帧，不阻塞后续命令。
 

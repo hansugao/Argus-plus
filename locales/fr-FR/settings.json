@@ -107,8 +107,11 @@
     "history": "Lorsque le graphique historique a le focus",
     "time": "Sélectionnez le moment précédent/suivant",
     "timeJump": "Reculer/avancer davantage",
-    "timeEnds": "Sélectionnez le moment le plus ancien/le plus récent",
-    "latest": "Effacez la sélection de l’heure et revenez aux dernières données"
+    "timeFirst": "Sélectionner le point le plus ancien du graphique",
+    "latest": "Revenir aux dernières mesures et continuer la mise à jour",
+    "zoom": "Zoomer / dézoomer",
+    "zoomReset": "Afficher toute la plage",
+    "clearCursor": "Effacer le curseur et la sélection"
   },
   "hotkey": {
     "title": "Afficher ou masquer Argus",
@@ -169,13 +172,15 @@
       "stopped": "Arrêté",
       "startPending": "Démarrage",
       "stopPending": "Arrêt en cours",
-      "unavailable": "Indisponible"
+      "unavailable": "Indisponible",
+      "broken": "Endommagé",
+      "deletePending": "Suppression en cours"
     },
     "outdated": "La version du service {service} ne correspond pas à Argus {app}. Cliquez sur « Mettre le service à jour ».",
     "incompatible": "Cliquez sur « Mettre le service à jour » pour installer la version correspondant à Argus et établir la connexion.",
     "install": {
       "title": "Activer le service privilégié ?",
-      "body": "Après l’installation, le compte Windows actuel peut utiliser le service en arrière-plan sans nouvelle autorisation pour :\n· terminer, suspendre ou reprendre les processus de tout utilisateur, sauf les processus système critiques, et régler leur priorité, leur priorité d’I/O, leur priorité mémoire et leur mode d’efficacité ;\n· démarrer et arrêter tout service Windows et modifier son type de démarrage, y compris les services des logiciels de sécurité et de Windows Update ;\n· fermer toute connexion IPv4 TCP et consulter les fichiers utilisés, le trafic réseau et les lectures et écritures disque de tous les processus ;\n· consulter l’identité des disques, les attributs SMART et les journaux de santé avec des commandes fixes en lecture seule ;\n· lire les données des capteurs CPU et les vitesses des ventilateurs de la carte mère via des modules fixes lorsque PawnIO est installé.\n\nLes autres programmes exécutés avec des droits standard sous ce compte peuvent aussi utiliser ces opérations, ce qui accorde au compte une partie des droits d’administrateur. Installez le service uniquement sur un compte que vous utilisez personnellement. Il démarre avec Windows. Son installation nécessite une autorisation d’administrateur ; il peut être désinstallé ensuite dans Paramètres.",
+      "body": "Après l’installation, le compte Windows actuel peut utiliser le service en arrière-plan sans nouvelle autorisation pour :\n· terminer, suspendre ou reprendre les processus de tout utilisateur, sauf les processus système critiques, et régler leur priorité, leur priorité d’I/O, leur priorité mémoire et leur mode d’efficacité ;\n· démarrer, arrêter et supprimer tout service Windows et modifier son type de démarrage, y compris les services des logiciels de sécurité et de Windows Update ;\n· fermer toute connexion IPv4 TCP et consulter les fichiers utilisés, le trafic réseau et les lectures et écritures disque de tous les processus ;\n· consulter l’identité des disques, les attributs SMART et les journaux de santé avec des commandes fixes en lecture seule ;\n· lire les données des capteurs CPU et les vitesses des ventilateurs de la carte mère via des modules fixes lorsque PawnIO est installé.\n\nLes autres programmes exécutés avec des droits standard sous ce compte peuvent aussi utiliser ces opérations, ce qui accorde au compte une partie des droits d’administrateur. Installez le service uniquement sur un compte que vous utilisez personnellement. Il démarre avec Windows. Son installation nécessite une autorisation d’administrateur ; il peut être désinstallé ensuite dans Paramètres.",
       "action": "Installer et activer"
     },
     "uninstall": {
@@ -187,7 +192,20 @@
     "start": "Démarrer le service",
     "update": "Mettre le service à jour",
     "ready": "Le service privilégié est prêt.",
-    "uninstalled": "Le service privilégié a été désinstallé."
+    "uninstalled": "Le service privilégié a été désinstallé.",
+    "broken": {
+      "repair": "Cliquez sur « Réparer le service » pour réinstaller les fichiers du service et rétablir la connexion, ou sur « Désinstaller » pour supprimer l’inscription résiduelle du service. Les deux opérations nécessitent une autorisation d’administrateur.",
+      "remove": "Cliquez sur « Désinstaller » pour supprimer l’inscription résiduelle du service ; il pourra ensuite être réinstallé. La désinstallation nécessite une autorisation d’administrateur.",
+      "notice": "Le service privilégié est endommagé et ne peut pas démarrer. Consultez Paramètres → Autorisations.",
+      "view": "Voir"
+    },
+    "deletePending": "Le service a été désinstallé. Windows supprimera son inscription lorsque les autres programmes auront fermé leurs handles sur ce service. Fermez les programmes qui l’affichent, comme la console Services, puis actualisez l’état ; un redémarrage de Windows termine également la suppression.",
+    "repair": {
+      "title": "Réparer le service privilégié ?",
+      "body": "L’enregistrement d’autorisation est perdu ; le compte pour lequel le service était autorisé ne peut pas être confirmé. La réparation réinstalle les fichiers du service et autorise le service pour le compte Windows actuel ; si le remplacement du Gestionnaire des tâches est activé, le Gestionnaire des tâches Windows est d’abord restauré.",
+      "confirm": "Réparer et activer",
+      "action": "Réparer le service"
+    }
   },
   "taskManager": {
     "title": "Remplacer le Gestionnaire des tâches",

@@ -21,6 +21,16 @@ impl Desktop {
         // The tray's flyouts, opened where the shell would put them but never
         // activated: "card", "panel", "warm" to make their window ahead of
         // use, or anything else to close them.
+        // The right button going down on the tray icon, before a right
+        // click (`trayFlyout: "panel"`) that follows it.
+        if control["trayPress"].as_bool() == Some(true) {
+            crate::shell::mark_right_press();
+        }
+        // The pointer resting on the tray icon ("rest") or leaving it
+        // ("leave"), as the shell reports it: the hover card waits first.
+        if let Some(hover) = control["trayHover"].as_str() {
+            crate::shell::tray_hover(&self.host, hover == "rest");
+        }
         if let Some(flyout) = control.get("trayFlyout") {
             let anchor = json!(crate::shell::sample_anchor());
             match flyout.as_str() {
@@ -46,6 +56,18 @@ impl Desktop {
                 cx,
             );
         }
+        // Displays of the test's own in place of the system's (an empty
+        // list, or none, for the system's): the components page and the
+        // panel list them, and the taskbar monitor gets a stand-in taskbar
+        // for each.
+        if let Some(displays) = control.get("taskbarDisplays") {
+            let displays =
+                serde_json::from_value::<Vec<crate::shell::displays::Display>>(displays.clone())
+                    .ok()
+                    .filter(|displays| !displays.is_empty());
+            crate::shell::displays::set_test(displays);
+            self.sync_monitors(cx);
+        }
         if let Some(change) = control.get("taskbarMonitor") {
             self.request(
                 "set_taskbar_monitor",
@@ -57,10 +79,9 @@ impl Desktop {
         }
         // An item of the desktop monitor's menu, as if chosen: the ones
         // that change its settings.
-        if let Some(item) = control["desktopMonitorMenu"]
-            .as_str()
-            .filter(|item| matches!(*item, "topmost" | "locked" | "hide"))
-        {
+        if let Some(item) = control["desktopMonitorMenu"].as_str().filter(|item| {
+            matches!(*item, "topmost" | "locked" | "hide") || item.starts_with("look:")
+        }) {
             self.desktop_monitor_event(&json!({ "menu": item }), window, cx);
         }
         // The taskbar monitor's panel, opened over the monitor on its
@@ -78,6 +99,21 @@ impl Desktop {
                 "no taskbar panel control {item}"
             ),
             None => {}
+        }
+        // A drag in that panel, from one part to another ([list, part,
+        // item] each, then a fraction of the second's height); with a
+        // fixture only, as other presses.
+        if self.options.fixture.is_some()
+            && let Some(drag) = control.get("taskbarPanelDrag")
+        {
+            fn part(at: &Value) -> [&str; 3] {
+                [0, 1, 2].map(|index| at[index].as_str().unwrap_or(""))
+            }
+            let fraction = drag[2].as_f64().unwrap_or(0.5) as f32;
+            assert!(
+                self.drag_in_taskbar_panel(part(&drag[0]), part(&drag[1]), fraction, cx),
+                "no taskbar panel parts for {drag}"
+            );
         }
         if self.options.fixture.is_some()
             && let Some(restored) = control.get("restored")
@@ -691,7 +727,7 @@ impl Desktop {
                 "skippedRequest":self.data.get("skippedRequest"),
                 "performance":self.performance_test_state(),
                 "star":self.star_test_state(),
-                "history":{"cursor":self.history_cursor,"requestedFrame":self.data.get("historyMomentAt"),"frame":self.data.get("historyMoment").map(|m| &m["system"]["ts"])},
+                "history":self.history_inspect(),
                 "sequence":self.sequence,"timestamp":self.snapshot["timestamp"],"processIcons":self.ui.icons.borrow().len(),
                 "allocationHeadroomBytes":crate::memory_pressure::available_memory(),
                 "nativeWindow":native_window,
@@ -701,7 +737,7 @@ impl Desktop {
                 "performanceCardHeight":self.perf_card_chrome.get().map(|chrome| f32::from(window.viewport_size().height - chrome)),
                 "aboutScroll":{"max":about_max,"offset":about_offset,"canScroll":about_max > 0.5,
                     "atEnd":about_max > 0.5 && (about_offset-about_max).abs() < 0.5},
-                "settingsScrollY":f32::from(self.settings_scroll.max_offset().y),"settingsTop":self.settings_scroll.top_item()});
+                "settingsScrollY":f32::from(self.settings_rail.scroll.max_offset().y),"settingsTop":self.settings_rail.scroll.top_item(),"sections":self.section_rail_state()});
             layout["watch"] = json!(self.data.get("processWatch").map(|watch|json!({"pid":watch["pid"],"state":watch["state"],"mode":watch["mode"],"runs":values(&watch["runs"]).len(),"liveRuns":watch["liveRuns"],"points":values(&watch["points"]).len(),"missing":values(&watch["points"]).iter().filter(|point|point["memory"].is_null()).count()})));
             layout["watchAction"] = json!(self.data.get("watchLastAction"));
             println!("{layout}");

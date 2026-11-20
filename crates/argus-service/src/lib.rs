@@ -24,7 +24,7 @@ use argus_core::tr;
 pub use background::{NetworkClient, RuleRunner};
 pub use diagnostics::ServiceDiagnostics;
 pub use disk::DiskClient;
-pub use install::{ServiceStatus, manage, status};
+pub use install::{Damage, ServiceStatus, manage, status};
 pub use network::NetworkFrame;
 pub use protocol::{Operation, Reply};
 pub use sensors::SensorClient;
@@ -34,6 +34,12 @@ pub const SERVICE_NAME: &str = if cfg!(debug_assertions) {
 } else {
     "ArgusPrivileged"
 };
+
+/// Whether `name` is the privileged service of either build, which only
+/// its own install and uninstall change.
+pub fn is_own_service(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ArgusPrivileged") || name.eq_ignore_ascii_case("ArgusPrivilegedDev")
+}
 const PIPE_NAME: &str = if cfg!(debug_assertions) {
     r"\\.\pipe\Argus.Privileged.Dev.v1"
 } else {
@@ -96,7 +102,9 @@ fn remove_for_uninstall() -> i32 {
     match status() {
         Ok(s) if s.state == "notInstalled" => 0,
         _ => match manage("uninstall") {
-            Ok(s) if s.state == "notInstalled" => 0,
+            // Deleted, with its files: a registration that another program's
+            // handle still keeps goes when that closes.
+            Ok(s) if matches!(s.state, "notInstalled" | "deletePending") => 0,
             _ => 1,
         },
     }
@@ -251,12 +259,9 @@ mod tests {
     fn status_issue_names_the_cause_in_fixed_words() {
         let issue = |error: Option<String>| {
             status_issue(&ServiceStatus {
-                state: "running",
                 authorized: true,
-                version: None,
                 error,
-                incompatible: false,
-                error_code: None,
+                ..ServiceStatus::new("running")
             })
             .map(|s| s.into_owned())
         };

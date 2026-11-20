@@ -26,6 +26,7 @@ mod process_icons;
 mod recorder;
 mod regions;
 mod release_notes;
+mod reorder;
 mod scrollbar;
 mod shift;
 mod star;
@@ -116,6 +117,8 @@ enum Action {
     Preference(String, Value),
     /// Text to copy and the locale key naming it in the confirmation.
     Copy(String, &'static str),
+    /// A command of the history page.
+    History(pages::history::Command),
     CloseOverlay,
     Confirm,
 }
@@ -201,6 +204,20 @@ struct Pending {
     cache: Option<String>,
     args: Value,
 }
+/// A disk's details page as it was opened: each opening reads once.
+#[derive(Clone, Copy)]
+struct DiskDetailsOpen {
+    /// The disk's PhysicalDrive number.
+    disk: u64,
+    /// `page_epoch` at the time: leaving the performance page and coming
+    /// back opens it anew.
+    epoch: u64,
+    /// When its read was last asked for: on opening, or by the user.
+    asked: Instant,
+    /// The read on opening was withheld (`disk_reads::held`): the page says
+    /// why and offers the read instead.
+    held: bool,
+}
 type TablePair = (
     Entity<gpui_kit::component::table::TableState<tables::NativeTable>>,
     Entity<tables::TableFrame>,
@@ -264,14 +281,18 @@ struct Desktop {
     fixture_samples: bool,
     chart_frame: u64,
     grid_bounds: RefCell<HashMap<String, Bounds<Pixels>>>,
-    core_grid_size: Rc<Cell<Size<Pixels>>>,
-    /// The columns the logical processors' grid was last arranged in.
+    /// The room the logical processors' grid last had before the view scrolls,
+    /// and how much of the view showed below its top.
+    core_grid_size: Rc<Cell<(Size<Pixels>, Pixels)>>,
+    /// The columns the logical processors' grid was last arranged in, and
+    /// what its cards' captions showed.
     core_columns: Cell<usize>,
-    settings_scroll: ScrollHandle,
-    components_scroll: ScrollHandle,
+    core_caption: Cell<model::CoreCaption>,
+    /// The settings' and the components' sections and the lists of them.
+    settings_rail: pages::section_rail::SectionRail,
+    components_rail: pages::section_rail::SectionRail,
     about_scroll: ScrollHandle,
     device_scroll: ScrollHandle,
-    settings_target: Option<usize>,
     page: String,
     page_epoch: u64,
     /// Where the last page change came from: -1, 0 (start-up) or 1.
@@ -368,9 +389,8 @@ struct Desktop {
     cpu_mode: String,
     cpu_page: String,
     disk_page: String,
-    /// The disk whose details page is open (PhysicalDrive number and
-    /// `page_epoch`) and when it was opened: each opening reads once.
-    disk_details_open: Option<(u64, u64, Instant)>,
+    /// The disk details page that is open, if one is.
+    disk_details_open: Option<DiskDetailsOpen>,
     interval: u64,
     paused: bool,
     control_paused: bool,
@@ -399,11 +419,8 @@ struct Desktop {
     first_frame_at: Option<Instant>,
     prefetched: bool,
     welcome_checked: bool,
-    history_range: String,
-    history_metric: String,
-    history_cursor: Option<i64>,
-    history_hover: Option<i64>,
-    settings_section: String,
+    /// The history page (`pages::history`).
+    history: pages::history::HistoryState,
     /// The tray's open flyouts (`tray`).
     tray: tray::Flyouts,
     /// The desktop monitor's window (`monitors`).
@@ -465,13 +482,13 @@ impl Desktop {
             fixture_samples: false,
             chart_frame: 0,
             grid_bounds: RefCell::new(HashMap::new()),
-            core_grid_size: Rc::new(Cell::new(size(px(0.), px(0.)))),
+            core_grid_size: Rc::new(Cell::new((size(px(0.), px(0.)), px(0.)))),
             core_columns: Cell::new(0),
-            settings_scroll: ScrollHandle::new(),
-            components_scroll: ScrollHandle::new(),
+            core_caption: Cell::new(model::CoreCaption::Full),
+            settings_rail: Default::default(),
+            components_rail: Default::default(),
             about_scroll: ScrollHandle::new(),
             device_scroll: ScrollHandle::new(),
-            settings_target: None,
             // A start opens the chosen page, wherever the last run ended; an
             // update's relaunch returns to the page it left (`page`, kept
             // as pages change). Later tray restores follow `trayPage`.
@@ -581,11 +598,7 @@ impl Desktop {
             first_frame_at: None,
             prefetched: false,
             welcome_checked: false,
-            history_range: "1h".into(),
-            history_metric: "cpu".into(),
-            history_cursor: None,
-            history_hover: None,
-            settings_section: "language".into(),
+            history: Default::default(),
             tray: tray::Flyouts::default(),
             monitors: monitors::Monitors::default(),
             ui_scale: appearance::SCALE.load(&prefs),
@@ -704,8 +717,11 @@ impl Desktop {
                             }
                             this.prefetch(window, cx);
                             // The privilege badge follows the service: it may start after Argus.
+                            // An administrator needs no service, but reads its state once:
+                            // a damaged registration is reported whoever runs Argus.
                             if this.last_privilege.elapsed() >= Duration::from_secs(30)
-                                && !boolean(&this.data["info"], "elevated")
+                                && (!boolean(&this.data["info"], "elevated")
+                                    || !this.data.contains_key("privilege"))
                             {
                                 this.last_privilege = Instant::now();
                                 this.request(
@@ -857,6 +873,8 @@ pub fn run(host: Host, options: Options) -> anyhow::Result<()> {
             .expect("create native window");
             cx.on_app_quit(move |_| {
                 owner.exit(0);
+                // A quit and the end of the Windows session both come here.
+                crate::disk_reads::finish();
                 crate::window_state::flush();
                 // Preferences are written in the background: finish before exit.
                 prefs::flush(Duration::from_secs(2));

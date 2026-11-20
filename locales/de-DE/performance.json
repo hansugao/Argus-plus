@@ -33,6 +33,16 @@
       "e": "E-Kerne",
       "lp": "LP-E-Kerne"
     },
+    "view": {
+      "overall": "Gesamtansicht",
+      "logical": "Mehrkernansicht"
+    },
+    "filter": {
+      "all": "Alle Kerne",
+      "p": "Nur P-Kerne",
+      "e": "Nur E-Kerne",
+      "lp": "Nur LP-E-Kerne"
+    },
     "filterAll": "Alle",
     "filterTitle": {
       "all": "Alle logischen Prozessoren anzeigen",
@@ -275,6 +285,7 @@
     "sub": "{used} / {total} GB ({percent} %)",
     "usage": "Speichernutzung",
     "legendInUse": "In Verwendung {value}",
+    "legendCompressed": "Komprimiert {value}",
     "legendModified": "Geändert {value}",
     "legendStandby": "Standby {value}",
     "legendFree": "Frei {value}",
@@ -282,7 +293,10 @@
     "modifiedDescription": "Speicher, dessen Inhalt auf die Festplatte geschrieben werden muss, bevor er für einen anderen Zweck verwendet werden kann",
     "standbyDescription": "Speicher, der zwischengespeicherte Daten und Code enthält, der nicht aktiv verwendet wird",
     "freeDescription": "Speicher, der derzeit nicht verwendet wird und der zuerst umgewidmet wird, wenn Prozesse, Treiber oder das Betriebssystem mehr Speicher benötigen",
+    "compressedDescription": "Speicher, der Prozessseiten in komprimierter Form enthält; zählt zum verwendeten Speicher",
+    "compressedSaving": "Komprimierter Speicher enthält schätzungsweise {stored} an Daten und spart dem System {saved} Speicher",
     "inUse": "In Verwendung",
+    "inUseCompressed": "In Verwendung (komprimiert)",
     "available": "Verfügbar",
     "committed": "Zugesichert",
     "cached": "Im Cache",
@@ -324,6 +338,12 @@
     "readAt": "Ausgelesen um {time}",
     "loading": "Festplatteninformationen werden gelesen…",
     "unavailable": "Keine Datenträgerdetails.",
+    "held": {
+      "title": "Automatisches Lesen angehalten",
+      "reason": "Nach dem letzten Lesen der Datenträgerdetails wurde Argus nicht ordnungsgemäß beendet. Möglicherweise ist Windows abgestürzt, der Strom ausgefallen oder der Argus-Prozess wurde beendet. Damit sich das Problem nicht bei jedem Start wiederholt, wird beim Öffnen dieser Seite nicht mehr automatisch gelesen.",
+      "note": "Beim Lesen werden nur lesende Abfragen an den Speichertreiber gesendet. Läuft Argus nach einem Lesevorgang eine Zeit lang normal weiter, wird das automatische Lesen fortgesetzt. Wird Argus erneut nicht ordnungsgemäß beendet, erscheint dieser Hinweis beim nächsten Start wieder.",
+      "read": "Trotzdem lesen"
+    },
     "openFailed": "Dieser Datenträger konnte nicht geöffnet werden.",
     "errorCode": "Windows-Fehlercode {code}",
     "health": "Zustand",
@@ -572,6 +592,9 @@
       "rows": "Liste"
     },
     "maxCoreClock": "Maximaler Kerntakt",
+    "powerState": "Energiezustand",
+    "lowPower": "Energiesparzustand",
+    "lowPowerHint": "Die GPU ist im Leerlauf und befindet sich in einem Energiesparzustand. Das Auslesen von Temperatur, Lüfter, Takt, Spannung und Leistung würde sie aufwecken und ist daher ausgesetzt. Die Werte werden wieder angezeigt, sobald die GPU verwendet wird.",
     "powerSource": "Quelle der Leistungsmessung",
     "sources": {
       "nvml": "NVIDIA NVML · Platine",

@@ -83,9 +83,37 @@ impl Kind {
     }
 }
 
-/// A request for the panel this soon after it went by itself is the click
-/// that sent it away.
-const REOPEN: Duration = Duration::from_millis(500);
+/// A panel that closed this soon before the right button went down was
+/// open when it went down: the press itself took the foreground from it,
+/// and the click that follows must not open it again.
+const PRESS_SLACK: Duration = Duration::from_millis(100);
+/// Without a press (the menu key), a panel that closed this recently was
+/// sent away by the request's own gesture.
+const UNPRESSED_SLACK: Duration = Duration::from_millis(300);
+/// A right click's press counts this long.
+const PRESS_SPAN: Duration = Duration::from_secs(2);
+
+/// Whether a panel was open when the right click asking for it began:
+/// it shows, or it closed no earlier than just before the press (taking
+/// the foreground from it, the press closed it first). `closed` is when it
+/// last began to close, `press` when the right button last went down.
+fn open_at_press(
+    shown: bool,
+    closed: Option<Instant>,
+    press: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if shown {
+        return true;
+    }
+    let Some(closed) = closed else {
+        return false;
+    };
+    match press.filter(|press| now.saturating_duration_since(*press) < PRESS_SPAN) {
+        Some(press) => closed + PRESS_SLACK >= press,
+        None => now.saturating_duration_since(closed) < UNPRESSED_SLACK,
+    }
+}
 /// How long after going to the tray the flyout window is made: after the
 /// window's own fade, before the pointer can reach the icon.
 const WARM_DELAY: Duration = Duration::from_millis(1500);
@@ -170,10 +198,6 @@ pub(in crate::frontend) struct Open {
 #[derive(Default)]
 pub(in crate::frontend) struct Flyouts {
     open: Option<Open>,
-    /// Which panel last went by itself (another window took the
-    /// foreground), and when. A right click on the tray icon does that on
-    /// its way down, so the click that follows closes rather than reopens.
-    panel_left: Option<(Kind, Instant)>,
     /// The window is to be made once the interface is idle.
     warming: bool,
 }
@@ -187,11 +211,16 @@ pub(in crate::frontend) struct Flyout {
     /// kinds shows the options of.
     monitor: TaskbarPanel,
     tabs: HashMap<&'static str, usize>,
+    /// A kind of reading or a reading of the taskbar monitor's panel being
+    /// dragged to another place.
+    order: super::reorder::Reorder,
     desktop: WeakEntity<Desktop>,
     desktop_window: AnyWindowHandle,
     host: Host,
     hwnd: HWND,
     phase: Phase,
+    /// Which flyout last began to close, and when.
+    closed: Option<(Kind, Instant)>,
     fade: bool,
     /// Take the foreground when shown (not in tests: they must not touch
     /// the desktop's focus).
@@ -305,11 +334,13 @@ impl Flyout {
             readings: Readings::default(),
             monitor: TaskbarPanel::default(),
             tabs: HashMap::new(),
+            order: Default::default(),
             desktop,
             desktop_window,
             host,
             hwnd,
             phase: Phase::Hidden,
+            closed: None,
             fade: false,
             activate,
             passive: true,
@@ -333,11 +364,6 @@ impl Flyout {
                 Phase::Placing | Phase::Entering(_) | Phase::Shown
             )
             && kind.is_none_or(|kind| kind == self.kind)
-    }
-
-    /// Whether a flyout of `kind` is fading out.
-    fn leaving(&self, kind: Kind) -> bool {
-        matches!(self.phase, Phase::Leaving(_)) && self.kind == kind
     }
 
     /// Lays the panel out once, transparent and off screen, then hides it.
@@ -465,6 +491,15 @@ impl Flyout {
 
     /// Fades out and hides the window.
     pub(in crate::frontend) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A drag the panel had begun ends with it, arranging nothing.
+        self.order.drop_lift();
+        if matches!(
+            self.phase,
+            Phase::Placing | Phase::Entering(_) | Phase::Shown
+        ) && !self.priming
+        {
+            self.closed = Some((self.kind, Instant::now()));
+        }
         match self.phase {
             Phase::Hidden | Phase::Leaving(_) => {}
             Phase::Entering(_) | Phase::Shown if self.fade => {
@@ -477,8 +512,6 @@ impl Flyout {
 
     /// Takes the window off screen, transparent for the next flyout.
     fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self.kind;
-        let was_shown = self.phase != Phase::Placing;
         self.phase = Phase::Hidden;
         crate::shell::dismiss_on_foreground(None);
         set_alpha(self.hwnd, Some(0));
@@ -515,7 +548,7 @@ impl Flyout {
             if reshown_closed(cx) {
                 return;
             }
-            let _ = desktop.update(cx, |desktop, _| desktop.tray_closed(kind, was_shown));
+            let _ = desktop.update(cx, |desktop, _| desktop.tray_closed());
         });
     }
 
@@ -581,7 +614,11 @@ impl Flyout {
     /// change.
     fn ask(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<Self>) {
         if let Ask::Taskbar(choice) = ask {
-            let closes = matches!(choice, TaskbarChoice::Settings | TaskbarChoice::Hide);
+            // Another display takes the monitor away from under the panel.
+            let closes = matches!(
+                choice,
+                TaskbarChoice::Settings | TaskbarChoice::Hide | TaskbarChoice::Display(_)
+            );
             let desktop = self.desktop.clone();
             let handle = self.desktop_window;
             cx.defer(move |cx| {
@@ -614,7 +651,7 @@ impl Flyout {
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = desktop.update(cx, |desktop, cx| match ask {
                     Ask::Pause => desktop.act(Action::Pause, window, cx),
-                    Ask::Settings => desktop.act(Action::Page("components".into()), window, cx),
+                    Ask::Settings => desktop.open_components("tray", window, cx),
                     Ask::Device(device) => desktop.act(Action::Device(device), window, cx),
                     Ask::Reveal(pid, create_time) => desktop.preference(
                         "revealProcess",
@@ -1093,7 +1130,7 @@ impl Render for Flyout {
         let content = match self.kind {
             Kind::Card => self.card(p),
             Kind::Panel => self.panel(p, cx),
-            Kind::Monitor => self.monitor_panel(p, cx),
+            Kind::Monitor => self.monitor_panel(p, window, cx),
         };
         let name = if self.kind == Kind::Monitor {
             label("components.taskbar.title")
@@ -1426,17 +1463,14 @@ impl Desktop {
         }
     }
 
-    /// The flyout has gone: the sampler slows down again, and a panel that
-    /// went by itself remembers when.
-    fn tray_closed(&mut self, kind: Kind, was_shown: bool) {
+    /// The flyout has gone: the sampler slows down again.
+    fn tray_closed(&mut self) {
         crate::shell::set_flyout_open(false);
-        if kind != Kind::Card && was_shown {
-            self.tray.panel_left = Some((kind, Instant::now()));
-        }
     }
 
     /// The tray asks for the quick panel, or the taskbar monitor for its
-    /// panel (`kind`): it opens, or closes when open.
+    /// panel (`kind`): it closes when it was open as the right button went
+    /// down, and opens otherwise, at once, however soon after it closed.
     pub(in crate::frontend) fn tray_flyout(
         &mut self,
         kind: Kind,
@@ -1444,25 +1478,20 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (shown, leaving) = self.tray.open.as_ref().map_or((false, false), |open| {
+        let (shown, closed) = self.tray.open.as_ref().map_or((false, None), |open| {
             let flyout = open.flyout.read(cx);
-            (flyout.showing(Some(kind)), flyout.leaving(kind))
+            (
+                flyout.showing(Some(kind)),
+                flyout
+                    .closed
+                    .filter(|(closed, _)| *closed == kind)
+                    .map(|(_, at)| at),
+            )
         });
-        if shown {
-            self.tray.panel_left = None;
-            self.close_tray(Some(kind), cx);
-            return;
-        }
-        // Going away because this click took the foreground from it.
-        if leaving {
-            return;
-        }
-        if self
-            .tray
-            .panel_left
-            .take()
-            .is_some_and(|(left, at)| left == kind && at.elapsed() < REOPEN)
-        {
+        if open_at_press(shown, closed, crate::shell::right_press(), Instant::now()) {
+            if shown {
+                self.close_tray(Some(kind), cx);
+            }
             return;
         }
         let Ok(anchor) = serde_json::from_value::<Anchor>(anchor.clone()) else {
@@ -1503,6 +1532,67 @@ impl Desktop {
         self.open_tray(Kind::Card, anchor, window, cx);
     }
 
+    /// A test's drag in the taskbar monitor's panel (`taskbarPanelDrag`):
+    /// pressed at the middle of one part the drag knows (list, part, item:
+    /// `Flyout::item_bounds`), moved in eight steps to a fraction of
+    /// another's height and let go, as a pointer would. False when either
+    /// part is not drawn.
+    pub(in crate::frontend) fn drag_in_taskbar_panel(
+        &mut self,
+        from: [&str; 3],
+        to: [&str; 3],
+        fraction: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(open) = self.tray.open.clone() else {
+            return false;
+        };
+        let flyout = open.flyout.read(cx);
+        let (Some(from), Some(to)) = (
+            flyout.item_bounds(from[0], from[1], from[2]),
+            flyout.item_bounds(to[0], to[1], to[2]),
+        ) else {
+            return false;
+        };
+        let start = from.center();
+        let end = point(to.center().x, to.top() + to.size.height * fraction);
+        let moved = |position, pressed_button| {
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position,
+                pressed_button,
+                ..Default::default()
+            })
+        };
+        let mut inputs = vec![
+            moved(start, None),
+            PlatformInput::MouseDown(MouseDownEvent {
+                position: start,
+                button: MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+        ];
+        for step in 1..=8 {
+            let t = step as f32 / 8.;
+            inputs.push(moved(start + (end - start) * t, Some(MouseButton::Left)));
+        }
+        inputs.push(PlatformInput::MouseUp(MouseUpEvent {
+            position: end,
+            button: MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        }));
+        let _ = open.window.update(cx, move |_, window, cx| {
+            window.defer(cx, move |window, cx| {
+                for input in inputs {
+                    window.dispatch_event(input, cx);
+                }
+            });
+            window.refresh();
+        });
+        true
+    }
+
     /// A new sample, an update or a pause: a flyout that shows follows.
     pub(in crate::frontend) fn refresh_tray(&mut self, cx: &mut Context<Self>) {
         let Some(open) = self.tray.open.clone() else {
@@ -1523,5 +1613,52 @@ impl Desktop {
         let readings = self.tray_readings();
         open.flyout
             .update(cx, |flyout, cx| flyout.set_readings(readings, cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_at_press;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_right_click_closes_only_a_panel_open_as_it_began() {
+        let now = Instant::now() + Duration::from_secs(10);
+        let ms = |ms: u64| Duration::from_millis(ms);
+        // Open: the click closes it.
+        assert!(open_at_press(true, None, Some(now - ms(80)), now));
+        // The press took the foreground from it and closed it first, its
+        // fade may be over by now: the click must not open it again.
+        assert!(open_at_press(
+            false,
+            Some(now - ms(75)),
+            Some(now - ms(80)),
+            now
+        ));
+        assert!(open_at_press(
+            false,
+            Some(now - ms(110)),
+            Some(now - ms(80)),
+            now
+        ));
+        // Closed by the click before (or a click elsewhere), then a quick
+        // right click: it opens.
+        assert!(!open_at_press(
+            false,
+            Some(now - ms(320)),
+            Some(now - ms(80)),
+            now
+        ));
+        assert!(!open_at_press(false, None, Some(now - ms(80)), now));
+        // The menu key, no press: only a panel closed a moment ago.
+        assert!(open_at_press(false, Some(now - ms(100)), None, now));
+        assert!(!open_at_press(false, Some(now - ms(600)), None, now));
+        // An old press does not count.
+        assert!(!open_at_press(
+            false,
+            Some(now - ms(2_400)),
+            Some(now - ms(2_500)),
+            now
+        ));
     }
 }

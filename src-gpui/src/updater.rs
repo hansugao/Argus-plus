@@ -1268,6 +1268,8 @@ fn launch(app: &Host, ready: &Ready) -> Failure {
     drop(file);
     // std::process::exit skips RunEvent::Exit.
     crate::window_state::flush();
+    crate::disk_reads::finish();
+    app.state::<crate::AppState>().sampler.shutdown();
     crate::stop_network_session();
     crate::frontend::flush_preferences();
     log::logger().flush();
