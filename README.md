@@ -1,5 +1,23 @@
 <div align="center">
 
+# Argus‑plus
+> 本仓库为 **Argus 个人增强衍生分支（plus）**
+> 📌 上游原版项目：[Ray‑lea/Argus](https://github.com/Ray-lea/Argus)
+> 持续同步上游主线代码，在原版基础上增加自定义扩展功能。
+
+✨ **本分支额外新增功能**
+- 托盘图标 RunCat 风格奔跑动画效果，**会根据内存占用情况自动变色**
+- 任务栏监控组件：字号、显示行数、透明度自定义
+
+📦 **本分支下载（GitHub Releases）**
+- `Aargus_plus.exe`：Enigma Virtual‑Box 单文件便携版
+- `argus‑plus.zip`：绿色压缩包版本，解压即用
+
+> ⚠️ 构建产物无官方代码签名，Windows SmartScreen 将提示发布者未知；全部源码公开，可自行编译核验。
+> 许可证延续上游：**AGPL‑3.0‑or‑later**，详见 LICENSE 文件。
+
+---
+
 <img src="resources/logo.svg" width="112" height="112" alt="Argus 标志">
 
 # Argus
