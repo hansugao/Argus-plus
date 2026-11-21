@@ -233,6 +233,29 @@
       "capsules": "Capsules",
       "figures": "Large figures"
     },
+    "size": {
+      "title": "Text size",
+      "desc": "The size of the text and readings on the taskbar, for every style; curve tiles, capsules and figures grow with it. A low taskbar sets labels on one row.",
+      "small": "Small",
+      "medium": "Medium",
+      "large": "Large"
+    },
+    "opacity": {
+      "title": "Opacity",
+      "desc": "The opacity of the monitor's text and tiles. Its window draws no background, so the taskbar always shows through."
+    },
+    "rows": {
+      "title": "Rows",
+      "desc": "Labels take two rows or one; a low taskbar always shows one.",
+      "two": "Two rows",
+      "one": "One row"
+    },
+    "color": {
+      "title": "Value colour",
+      "desc": "Labels colour their values by reading; off, they match the taskbar text. High values still turn amber.",
+      "tone": "Coloured",
+      "ink": "Plain"
+    },
     "panel": {
       "settings": "Component settings…",
       "hide": "Turn off taskbar monitor"

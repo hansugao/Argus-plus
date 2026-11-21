@@ -19,7 +19,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering},
 };
 use std::time::Instant;
-pub(crate) use taskbar_draw::{Cell as TaskbarCell, Group as TaskbarGroup, Tone as TaskbarTone};
+pub(crate) use taskbar_draw::{
+    Cell as TaskbarCell, Group as TaskbarGroup, Look as TaskbarLook, Tone as TaskbarTone,
+};
 pub(crate) use tray_anchor::Anchor;
 use windows::{
     Win32::{
@@ -823,21 +825,22 @@ pub fn apply_taskbar_monitor(app: &Host, monitor: &TaskbarMonitor) {
         }
         return;
     }
+    let look = taskbar_draw::Look {
+        style: monitor.style,
+        size: monitor.size,
+        rows: monitor.rows,
+        colored: monitor.colored,
+        opacity: monitor.opacity,
+    };
     if let Some(running) = running.as_ref() {
-        running.place(monitor.place, monitor.style, monitor.display.clone());
+        running.look(monitor.place, look, monitor.display.clone());
         return;
     }
     let Some(main) = app.get_window("main").and_then(|window| window.hwnd().ok()) else {
         return;
     };
     let test = std::env::args().any(|arg| arg == "--test");
-    match taskbar::Monitor::spawn(
-        main,
-        monitor.place,
-        monitor.style,
-        monitor.display.clone(),
-        test,
-    ) {
+    match taskbar::Monitor::spawn(main, monitor.place, look, monitor.display.clone(), test) {
         Ok(started) => *running = Some(started),
         Err(error) => argus_core::diagnostics::warn(
             "taskbar monitor creation",
@@ -867,12 +870,12 @@ pub fn taskbar_monitor_anchor() -> Option<Anchor> {
 pub fn taskbar_color(light: bool) -> u32 {
     if light { 0x00f3_f3f3 } else { 0x0020_2020 }
 }
-/// The taskbar monitor's look in `style` with `groups`, as it would show
+/// The taskbar monitor's look in `look` with `groups`, as it would show
 /// on the taskbar at `scale` (light or dark, `light`): an opaque image on
 /// the taskbar's colour, straight BGRA, its width and height in pixels.
 pub fn taskbar_preview(
     groups: &[TaskbarGroup],
-    style: crate::settings::TaskbarStyle,
+    look: taskbar_draw::Look,
     light: bool,
     scale: f32,
 ) -> Option<(u32, u32, Vec<u8>)> {
@@ -880,18 +883,20 @@ pub fn taskbar_preview(
     thread_local! {
         static PAINTER: RefCell<Option<taskbar_draw::Painter>> = const { RefCell::new(None) };
     }
-    let font = taskbar_draw::font_size(scale);
+    let font = taskbar_draw::font_size(scale * look.size.factor());
     PAINTER.with_borrow_mut(|painter| {
         if painter.as_ref().is_none_or(|painter| painter.font != font) {
             *painter = taskbar_draw::Painter::new(font);
         }
         let painter = painter.as_ref()?;
-        // Laid out as on Windows 11's 48 px taskbar, then cut to its
-        // middle 40 px, where every style's readings lie.
+        // Laid out as on Windows 11's 48 px taskbar, then cut to the band
+        // where every style's readings lie: 40 px, or as much of it as the
+        // text size fills.
         let height = (48. * scale).round() as i32;
-        let layout = taskbar_draw::lay_out(groups, height, scale, style, painter, None);
-        let pixels = painter.paint(&layout, light, false, scale)?;
-        let cut = (4. * scale).round() as i32;
+        let layout = taskbar_draw::lay_out(groups, height, scale, look, painter, None);
+        let pixels = painter.paint(&layout, light, scale)?;
+        let band = (40. * scale * look.size.factor()).round() as i32;
+        let cut = ((height - band) / 2).clamp(0, height / 2 - 1);
         let row = layout.width as usize * 4;
         let mut pixels = pixels[cut as usize * row..(height - cut) as usize * row].to_vec();
         let [red, green, blue, _] = taskbar_color(light).to_le_bytes();
@@ -952,10 +957,11 @@ pub fn sampling_state(hwnd: HWND) -> WindowState {
         window_state(hwnd)
     }
 }
-/// A new sample for the tray: its tooltip and the CPU load a live icon shows.
-pub fn set_tray_reading(_app: &Host, text: &str, cpu: f64) {
+/// A new sample for the tray: its tooltip, the CPU load a live icon shows and
+/// the memory use that colours the runner.
+pub fn set_tray_reading(_app: &Host, text: &str, cpu: f64, memory: u8) {
     if let Some(worker) = TRAY.lock().unwrap().clone() {
-        worker.reading(text, cpu.round().clamp(0., 100.) as u8);
+        worker.reading(text, cpu.round().clamp(0., 100.) as u8, memory);
     }
 }
 /// The tray icon's look, its hover card and what a right click opens.
@@ -1101,12 +1107,15 @@ impl NativeTray {
             TrayIcon::Load => tray_icon::Look::Load,
             TrayIcon::Share => tray_icon::Look::Share,
             TrayIcon::Number => tray_icon::Look::Number,
+            TrayIcon::Runner => tray_icon::Look::Runner,
         };
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
         let spec = tray_icon::Spec {
             look,
             load: update.load,
             recent: update.recent,
+            memory: update.memory,
+            frame: update.frame,
             light: update.light,
             badge: update.badge,
         };
@@ -1234,6 +1243,41 @@ mod tray_tests {
         };
         assert_eq!(restarted.data().guidItem, icon.data().guidItem);
         assert_ne!(restarted.data().hWnd, icon.data().hWnd);
+    }
+
+    #[test]
+    fn the_runner_frames_reach_the_shell_as_new_icons() {
+        let guid = tray_identity::guid(
+            "dev.argus.taskmanager.test.runner",
+            Path::new(r"C:\Argus\argus.exe"),
+        );
+        let mut icon = NativeTray {
+            hwnd: 3,
+            guid,
+            badge: None,
+            generation: None,
+            live: None,
+        };
+        let mut icons = Vec::new();
+        for frame in 0..2u8 {
+            icon.write_with(
+                tray::Update {
+                    look: TrayIcon::Runner,
+                    load: Some(50),
+                    memory: Some(75),
+                    frame,
+                    ..Default::default()
+                },
+                |message, data| {
+                    if message == NIM_ADD || message == NIM_MODIFY {
+                        icons.push(data.hIcon.0 as isize);
+                    }
+                    true
+                },
+            );
+        }
+        assert_eq!(icons.len(), 2);
+        assert_ne!(icons[0], icons[1]);
     }
 }
 

@@ -27,7 +27,7 @@
 //! replaced, had few levels of coverage, hinted curves into steps and left
 //! the coverage uncorrected: light text on a dark taskbar looked ragged and
 //! soft.
-use crate::settings::TaskbarStyle as Style;
+use crate::settings::{TaskbarSize, TaskbarStyle as Style};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -111,6 +111,7 @@ pub(crate) struct Group {
 
 /// Arranges the groups in columns of `rows` cells: a group's cells stay
 /// together, and single cells share a column in order.
+#[cfg(test)]
 pub(crate) fn columns(groups: &[Group], rows: usize) -> Vec<Vec<&Cell>> {
     stacks(groups, rows)
         .into_iter()
@@ -207,7 +208,7 @@ pub(crate) struct Pill {
 }
 
 /// The monitor laid out at one size.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Layout {
     pub width: i32,
     pub height: i32,
@@ -216,6 +217,52 @@ pub(crate) struct Layout {
     pub pills: Vec<Pill>,
     /// The labels' text size, pixels.
     pub font: i32,
+    /// How much of the text and tiles shows, percent; the taskbar's own
+    /// background shows through the rest.
+    pub opacity: u8,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            runs: Vec::new(),
+            tiles: Vec::new(),
+            pills: Vec::new(),
+            font: 0,
+            opacity: 100,
+        }
+    }
+}
+
+/// How the monitor shows its readings: the style, the text's size, the
+/// labels' own choices (one row or two, values in their readings' colours),
+/// and its opacity.
+/// The size multiplies the sizes `size_scale` gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look {
+    pub style: Style,
+    pub size: TaskbarSize,
+    /// One row of labels or two; the other styles ignore it.
+    pub rows: u8,
+    /// Labels' values in their reading's colour rather than the taskbar's.
+    pub colored: bool,
+    /// How much of the text and tiles shows, percent; one of the
+    /// interface's monitor opacities.
+    pub opacity: u8,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            style: Style::default(),
+            size: TaskbarSize::default(),
+            rows: 2,
+            colored: true,
+            opacity: 100,
+        }
+    }
 }
 
 /// The labels' text size, pixels, at `scale` as `size_scale` gives it:
@@ -381,23 +428,24 @@ pub(crate) fn lay_out(
     groups: &[Group],
     height: i32,
     scale: f32,
-    style: Style,
+    look: Look,
     fonts: &impl Fonts,
     reserve: Option<(&mut Reserve, Instant)>,
 ) -> Layout {
     let style = if height < (36. * scale).round() as i32 {
         Style::Labels
     } else {
-        style
+        look.style
     };
-    let scale = size_scale(height, scale);
+    let scale = size_scale(height, scale) * look.size.factor();
     let mut layout = Layout {
         height,
         font: font_size(scale),
+        opacity: look.opacity.clamp(60, 100),
         ..Layout::default()
     };
     layout.width = match style {
-        Style::Labels => labels(&mut layout, groups, scale, fonts, reserve),
+        Style::Labels => labels(&mut layout, groups, scale, look, fonts, reserve),
         Style::Curves => curves(&mut layout, groups, scale, fonts),
         Style::Capsules => capsules(&mut layout, groups, scale, fonts, reserve),
         Style::Figures => figures(&mut layout, groups, scale, fonts, reserve),
@@ -410,18 +458,20 @@ fn labels(
     layout: &mut Layout,
     groups: &[Group],
     scale: f32,
+    look: Look,
     fonts: &impl Fonts,
     mut reserve: Option<(&mut Reserve, Instant)>,
 ) -> i32 {
     let px = |logical: f32| (logical * scale).round() as i32;
     let (font, height) = (layout.font, layout.height);
     let line = (font as f32 * 4. / 3.).round() as i32;
-    let rows = if height >= 2 * line + px(4.) { 2 } else { 1 };
+    let room = |rows: u8| rows.clamp(1, 2) as usize;
+    let rows = room(look.rows).min(if height >= 2 * line + px(4.) { 2 } else { 1 });
     // The capitals' middle on the row's middle.
     let baseline = ((line as f32 + fonts.cap(font)) / 2.).round() as i32;
     let (pad, inner, gap) = (px(8.), px(7.), px(12.));
     let mut x = pad;
-    let columns = columns(groups, rows);
+    let columns = stacks(groups, rows);
     for (index, column) in columns.iter().enumerate() {
         if index > 0 {
             x += gap;
@@ -431,11 +481,11 @@ fn labels(
         let tags = column
             .iter()
             .enumerate()
-            .map(|(row, cell)| {
+            .map(|(row, (cell, _))| {
                 let before = match row {
-                    0 if rows == 1 && index > 0 => columns[index - 1].last().copied(),
+                    0 if rows == 1 && index > 0 => columns[index - 1].last().map(|(cell, _)| *cell),
                     0 => None,
-                    row => Some(column[row - 1]),
+                    row => Some(column[row - 1].0),
                 };
                 cell.tag_after(before).to_owned()
             })
@@ -446,14 +496,14 @@ fn labels(
             .collect::<Vec<_>>();
         let values = column
             .iter()
-            .map(|cell| fonts.width(&cell.value, font, true))
+            .map(|(cell, _)| fonts.width(&cell.value, font, true))
             .collect::<Vec<_>>();
         let width = column
             .iter()
             .zip(&names)
             .zip(&values)
             .enumerate()
-            .map(|(row, ((cell, name), value))| {
+            .map(|(row, (((cell, _), name), value))| {
                 let room = held(
                     &mut reserve,
                     cell.kept("labels"),
@@ -470,7 +520,9 @@ fn labels(
             .unwrap_or(0);
         // A lone cell sits in the middle of the column's height.
         let top = (height - column.len() as i32 * line) / 2;
-        for (row, ((cell, tag), value)) in column.iter().zip(&tags).zip(&values).enumerate() {
+        for (row, (((cell, group), tag), value)) in
+            column.iter().zip(&tags).zip(&values).enumerate()
+        {
             let y = top + row as i32 * line + baseline;
             if !tag.is_empty() {
                 layout.runs.push(Run {
@@ -483,13 +535,20 @@ fn labels(
                     shade: Shade::Name,
                 });
             }
+            let paint = if cell.high {
+                Paint::High
+            } else if look.colored {
+                Paint::Tone(group.tone)
+            } else {
+                Paint::Ink
+            };
             layout.runs.push(Run {
                 text: cell.value.clone(),
                 x: x + width - value,
                 baseline: y,
                 size: font,
                 value: true,
-                paint: value_paint(cell),
+                paint,
                 shade: Shade::Full,
             });
         }
@@ -831,15 +890,13 @@ fn hex(value: u32) -> Rgb {
 
 /// The taskbar's colours: text as the system's own (`tray_icon`), names a
 /// step quieter than values and units quieter still, amber for high
-/// values, the fill a taskbar button shows under the pointer, a tile's
-/// fill, and the devices' colours as the interface's
+/// values, a tile's fill, and the devices' colours as the interface's
 /// (`resources/theme.json`).
 struct Colors {
     ink: Rgb,
     high: Rgb,
     name: f32,
     unit: f32,
-    hover: (Rgb, f32),
     tile: f32,
     /// A capsule's fill.
     pill: f32,
@@ -855,7 +912,6 @@ fn colors(light: bool) -> Colors {
             high: hex(0xc27a00),
             name: 0.72,
             unit: 0.6,
-            hover: (hex(0x000000), 0.05),
             tile: 0.045,
             pill: 0.06,
             curve: (0.16, 0.8),
@@ -867,7 +923,6 @@ fn colors(light: bool) -> Colors {
             high: hex(0xf4b446),
             name: 0.78,
             unit: 0.6,
-            hover: (hex(0xffffff), 0.08),
             tile: 0.06,
             pill: 0.085,
             curve: (0.22, 0.9),
@@ -1164,10 +1219,10 @@ impl Painter {
         }
     }
 
-    /// The image of `layout` on a light or dark taskbar, with the pointer's
-    /// fill when `hover`. Every pixel keeps a trace of alpha so that the
-    /// whole window answers the pointer, not only its glyphs.
-    pub fn paint(&self, layout: &Layout, light: bool, hover: bool, scale: f32) -> Option<Vec<u8>> {
+    /// The image of `layout` on a light or dark taskbar. Every pixel keeps a
+    /// trace of alpha so that the whole window answers the pointer, not only
+    /// its glyphs; nothing else is painted behind the text.
+    pub fn paint(&self, layout: &Layout, light: bool, scale: f32) -> Option<Vec<u8>> {
         let (width, height) = (layout.width, layout.height);
         if width <= 0 || height <= 0 {
             return None;
@@ -1176,18 +1231,6 @@ impl Painter {
         let mut pixels = vec![[0f32; 4]; (width * height) as usize];
         for pixel in &mut pixels {
             pixel[3] = 1. / 255.;
-        }
-        if hover {
-            let inset = (2. * scale).round();
-            let (color, alpha) = colors.hover;
-            fill(
-                &mut pixels,
-                width,
-                [0., inset, width as f32, height as f32 - inset],
-                4. * scale,
-                color,
-                alpha,
-            );
         }
         for tile in &layout.tiles {
             fill(
@@ -1240,6 +1283,16 @@ impl Painter {
                 colors.paint(run.paint),
                 colors.shade(run.shade),
             );
+        }
+        // The monitor's opacity, scaling premultiplied pixels keeps colour
+        // and coverage in step; the taskbar shows through the rest.
+        let opacity = f32::from(layout.opacity.clamp(60, 100)) / 100.;
+        if opacity < 1. {
+            for pixel in &mut pixels {
+                for channel in pixel {
+                    *channel *= opacity;
+                }
+            }
         }
         let mut bytes = Vec::with_capacity(pixels.len() * 4);
         for [r, g, b, a] in pixels {
@@ -1510,10 +1563,20 @@ impl IDWriteTextRenderer_Impl for Renderer_Impl {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cell, Fonts, Group, Paint, Painter, Run, Shade, Tone, columns, font_size, lay_out,
+        Cell, Fonts, Group, Look, Paint, Painter, Run, Shade, Tone, columns, font_size, lay_out,
         size_scale, split,
     };
-    use crate::settings::TaskbarStyle as Style;
+    use crate::settings::{TaskbarSize, TaskbarStyle as Style};
+
+    fn look(style: Style) -> Look {
+        Look {
+            style,
+            // The layout numbers below are for the middle size; other sizes
+            // multiply them.
+            size: TaskbarSize::Medium,
+            ..Look::default()
+        }
+    }
 
     /// Every character 10 px wide whatever its size; capitals 9 px high at
     /// 13 px.
@@ -1614,7 +1677,7 @@ mod tests {
     #[test]
     fn labels_keep_the_width_of_their_widest_value_and_rows_centre() {
         let groups = vec![single("CPU", "1%"), single("MEM", "45%")];
-        let layout = lay_out(&groups, 48, 1., Style::Labels, &Even, None);
+        let layout = lay_out(&groups, 48, 1., look(Style::Labels), &Even, None);
         // Padding 8, name 30, gap 7, the widest value "100%" 40, padding 8.
         assert_eq!(layout.width, 8 + 30 + 7 + 40 + 8);
         assert_eq!(layout.font, 15);
@@ -1626,7 +1689,7 @@ mod tests {
         // The same readings with other values keep the size.
         let busier = vec![single("CPU", "100%"), single("MEM", "99%")];
         assert_eq!(
-            lay_out(&busier, 48, 1., Style::Labels, &Even, None).width,
+            lay_out(&busier, 48, 1., look(Style::Labels), &Even, None).width,
             layout.width
         );
         // On the taskbar a column keeps only the room its values took
@@ -1636,19 +1699,19 @@ mod tests {
             &groups,
             48,
             1.,
-            Style::Labels,
+            look(Style::Labels),
             &Even,
             Some((&mut reserve, std::time::Instant::now())),
         );
         assert_eq!(held.width, layout.width - 10);
         // A taskbar too low for two rows sets them side by side, everything
         // smaller: 13 px text, padding 7, gap 6, 10 between columns.
-        let low = lay_out(&groups, 30, 1., Style::Labels, &Even, None);
+        let low = lay_out(&groups, 30, 1., look(Style::Labels), &Even, None);
         assert_eq!(low.font, 13);
         assert_eq!(low.width, 7 + 76 + 10 + 76 + 7);
         assert!(low.runs.iter().all(|run| run.baseline == 6 + 13));
         // Windows 10's 40 px taskbar still takes two rows of 13 px.
-        let lower = lay_out(&groups, 40, 1., Style::Labels, &Even, None);
+        let lower = lay_out(&groups, 40, 1., look(Style::Labels), &Even, None);
         assert_eq!(lower.font, 13);
         assert_eq!(
             values(&lower.runs)[1].baseline - values(&lower.runs)[0].baseline,
@@ -1663,9 +1726,106 @@ mod tests {
     }
 
     #[test]
+    fn labels_follow_their_row_and_colour_settings() {
+        let groups = vec![single("CPU", "1%"), single("MEM", "45%")];
+        let two = lay_out(&groups, 48, 1., look(Style::Labels), &Even, None);
+        let one = lay_out(
+            &groups,
+            48,
+            1.,
+            Look {
+                rows: 1,
+                ..look(Style::Labels)
+            },
+            &Even,
+            None,
+        );
+        // Two rows put the second reading under the first; one row sets
+        // them side by side.
+        assert_ne!(values(&two.runs)[0].baseline, values(&two.runs)[1].baseline);
+        assert_eq!(values(&one.runs)[0].baseline, values(&one.runs)[1].baseline);
+        // Values in their reading's colour by default, or the taskbar's
+        // own when that is turned off; a high one stays amber.
+        assert_eq!(values(&two.runs)[0].paint, Paint::Tone(Tone::Cpu));
+        let plain = lay_out(
+            &groups,
+            48,
+            1.,
+            Look {
+                colored: false,
+                ..look(Style::Labels)
+            },
+            &Even,
+            None,
+        );
+        assert_eq!(values(&plain.runs)[0].paint, Paint::Ink);
+        let mut high = groups.clone();
+        high[0].cells[0].high = true;
+        let amber = lay_out(
+            &high,
+            48,
+            1.,
+            Look {
+                colored: false,
+                ..look(Style::Labels)
+            },
+            &Even,
+            None,
+        );
+        assert_eq!(values(&amber.runs)[0].paint, Paint::High);
+        // The size multiplies the text in every style, and a taskbar too
+        // low for the larger rows shows one.
+        let large = lay_out(
+            &groups,
+            48,
+            1.,
+            Look {
+                size: TaskbarSize::Large,
+                ..look(Style::Labels)
+            },
+            &Even,
+            None,
+        );
+        assert!(large.font > two.font);
+        assert_eq!(
+            values(&large.runs)[0].baseline,
+            values(&large.runs)[1].baseline
+        );
+        let small = lay_out(
+            &groups,
+            48,
+            1.,
+            Look {
+                size: TaskbarSize::Small,
+                ..look(Style::Labels)
+            },
+            &Even,
+            None,
+        );
+        assert!(small.font < two.font);
+        // The tile styles grow with the size too.
+        let tiles = lay_out(
+            &groups,
+            48,
+            1.,
+            Look {
+                size: TaskbarSize::Large,
+                ..look(Style::Curves)
+            },
+            &Even,
+            None,
+        );
+        let medium_tiles = lay_out(&groups, 48, 1., look(Style::Curves), &Even, None);
+        assert!(
+            tiles.tiles[0].rect[3] - tiles.tiles[0].rect[1]
+                > medium_tiles.tiles[0].rect[3] - medium_tiles.tiles[0].rect[1]
+        );
+    }
+
+    #[test]
     fn curves_set_each_reading_on_a_tile_over_its_curve() {
         let groups = vec![single("CPU", "1%"), rates("1 KB/s", "2 KB/s")];
-        let layout = lay_out(&groups, 48, 1., Style::Curves, &Even, None);
+        let layout = lay_out(&groups, 48, 1., look(Style::Curves), &Even, None);
         assert_eq!(layout.tiles.len(), 2);
         // Name 30 and the widest figure "100" with its unit "%", 40, inside
         // 9 px either side and 9 apart; tiles 40 px high in the middle.
@@ -1684,7 +1844,7 @@ mod tests {
         // tile's curve amber.
         let mut busier = vec![single("CPU", "100%"), rates("999.9 MB/s", "0 KB/s")];
         busier[0].cells[0].high = true;
-        let again = lay_out(&busier, 48, 1., Style::Curves, &Even, None);
+        let again = lay_out(&busier, 48, 1., look(Style::Curves), &Even, None);
         assert_eq!(
             again.tiles.iter().map(|tile| tile.rect).collect::<Vec<_>>(),
             layout
@@ -1698,7 +1858,14 @@ mod tests {
 
     #[test]
     fn figures_set_a_large_figure_under_a_name_in_its_colour() {
-        let layout = lay_out(&[single("CPU", "41%")], 48, 1., Style::Figures, &Even, None);
+        let layout = lay_out(
+            &[single("CPU", "41%")],
+            48,
+            1.,
+            look(Style::Figures),
+            &Even,
+            None,
+        );
         let name = &layout.runs[0];
         assert_eq!((name.size, name.baseline), (12, 24 - 5));
         assert_eq!(name.paint, Paint::Tone(Tone::Cpu));
@@ -1718,7 +1885,7 @@ mod tests {
             &[single("CPU", "41%"), single("GPU", "7%")],
             48,
             1.,
-            Style::Figures,
+            look(Style::Figures),
             &Even,
             Some((&mut reserve, now)),
         );
@@ -1726,7 +1893,14 @@ mod tests {
         // padding 8.
         assert_eq!(held.width, 8 + 30 + 9 + 30 + 8);
         // A taskbar too low for two rows shows labels instead.
-        let low = lay_out(&[single("CPU", "41%")], 30, 1., Style::Figures, &Even, None);
+        let low = lay_out(
+            &[single("CPU", "41%")],
+            30,
+            1.,
+            look(Style::Figures),
+            &Even,
+            None,
+        );
         assert!(low.runs.iter().all(|run| run.size == 13));
     }
 
@@ -1743,7 +1917,7 @@ mod tests {
         ];
         // In colour, each after its device's reading.
         for style in [Style::Figures, Style::Capsules, Style::Curves] {
-            let layout = lay_out(&groups, 48, 1., style, &Even, None);
+            let layout = lay_out(&groups, 48, 1., look(style), &Even, None);
             assert_eq!(
                 texts(&layout.runs)
                     .into_iter()
@@ -1755,7 +1929,7 @@ mod tests {
         }
         // In plain names, two rows: only under its device's reading; the
         // GPU's temperature opens a column of its own and names the GPU.
-        let labels = lay_out(&groups, 48, 1., Style::Labels, &Even, None);
+        let labels = lay_out(&groups, 48, 1., look(Style::Labels), &Even, None);
         let names = labels
             .runs
             .iter()
@@ -1764,7 +1938,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["CPU", "Temp", "RAM", "GPU", "GPU"]);
         // In one row, right after it.
-        let low = lay_out(&groups, 30, 1., Style::Labels, &Even, None);
+        let low = lay_out(&groups, 30, 1., look(Style::Labels), &Even, None);
         let names = low
             .runs
             .iter()
@@ -1779,14 +1953,14 @@ mod tests {
         let mut busy = single("GPU", "94%");
         busy.tone = Tone::Gpu;
         busy.cells[0].high = true;
-        let figures = lay_out(&[busy.clone()], 48, 1., Style::Figures, &Even, None);
+        let figures = lay_out(&[busy.clone()], 48, 1., look(Style::Figures), &Even, None);
         assert_eq!(figures.runs[0].paint, Paint::Tone(Tone::Gpu));
         assert!(
             values(&figures.runs)
                 .iter()
                 .all(|run| run.paint == Paint::High)
         );
-        let capsules = lay_out(&[busy], 48, 1., Style::Capsules, &Even, None);
+        let capsules = lay_out(&[busy], 48, 1., look(Style::Capsules), &Even, None);
         assert_eq!(capsules.pills[0].paint, Paint::Tone(Tone::Gpu));
         assert!(
             values(&capsules.runs)
@@ -1798,7 +1972,7 @@ mod tests {
     #[test]
     fn capsules_line_up_in_one_row_and_keep_their_width() {
         let groups = vec![single("CPU", "1%"), rates("1 KB/s", "2 KB/s")];
-        let layout = lay_out(&groups, 48, 1., Style::Capsules, &Even, None);
+        let layout = lay_out(&groups, 48, 1., look(Style::Capsules), &Even, None);
         assert_eq!(layout.pills.len(), 2);
         // 30 px high in the middle of 48. Inside 9, a dot of 7 and 5, the
         // name 30 and 5, the widest "100%" 40, inside 9: 105.
@@ -1817,7 +1991,7 @@ mod tests {
         // Other values keep the capsules where they are.
         let busier = vec![single("CPU", "100%"), rates("999.9 MB/s", "0 KB/s")];
         assert_eq!(
-            lay_out(&busier, 48, 1., Style::Capsules, &Even, None).pills,
+            lay_out(&busier, 48, 1., look(Style::Capsules), &Even, None).pills,
             layout.pills
         );
     }
@@ -1842,17 +2016,24 @@ mod tests {
                 std::slice::from_ref(&used),
                 48,
                 1.,
-                style,
+                look(style),
                 &Even,
                 Some((&mut reserve, start)),
             );
             let both = [share.clone(), used.clone()];
-            let after = lay_out(&both, 48, 1., style, &Even, Some((&mut reserve, later)));
+            let after = lay_out(
+                &both,
+                48,
+                1.,
+                look(style),
+                &Even,
+                Some((&mut reserve, later)),
+            );
             let fresh = lay_out(
                 &both,
                 48,
                 1.,
-                style,
+                look(style),
                 &Even,
                 Some((&mut Reserve::default(), later)),
             );
@@ -1871,7 +2052,7 @@ mod tests {
                 &[single("CPU", value)],
                 48,
                 1.,
-                Style::Capsules,
+                look(Style::Capsules),
                 &Even,
                 Some((&mut reserve, start + Duration::from_secs(seconds))),
             );
@@ -1913,8 +2094,8 @@ mod tests {
             }],
             ..Group::default()
         }];
-        let layout = lay_out(&groups, 48, 1.25, Style::Labels, &painter, None);
-        let pixels = painter.paint(&layout, false, false, 1.25).unwrap();
+        let layout = lay_out(&groups, 48, 1.25, look(Style::Labels), &painter, None);
+        let pixels = painter.paint(&layout, false, 1.25).unwrap();
         assert_eq!(pixels.len(), (layout.width * layout.height * 4) as usize);
         let at = |x: i32, y: i32| {
             let index = ((y * layout.width + x) * 4) as usize;
@@ -1941,6 +2122,41 @@ mod tests {
         assert!(value[3] > 200 && value[2] > value[0], "{value:?}");
         let name = strongest(&layout.runs[0]);
         assert!(name[3] > 120 && name[0] == name[2], "{name:?}");
+        // A lower opacity scales the same premultiplied pixels, so the text
+        // dims and the taskbar shows through without changing its colour.
+        let dim = lay_out(
+            &groups,
+            48,
+            1.25,
+            Look {
+                opacity: 60,
+                ..look(Style::Labels)
+            },
+            &painter,
+            None,
+        );
+        let faded = painter.paint(&dim, false, 1.25).unwrap();
+        let faded_at = |x: i32, y: i32| {
+            let index = ((y * dim.width + x) * 4) as usize;
+            [
+                faded[index],
+                faded[index + 1],
+                faded[index + 2],
+                faded[index + 3],
+            ]
+        };
+        // The brightest pixel of the dimmed value is about 60% of the
+        // opaque one, and still a pixel the window answers.
+        let bright = {
+            let right = dim.runs[1].x + painter.width(&dim.runs[1].text, dim.runs[1].size, true);
+            (dim.runs[1].baseline - dim.runs[1].size..dim.runs[1].baseline + 3)
+                .flat_map(|y| (dim.runs[1].x..right).map(move |x| (x, y)))
+                .map(|(x, y)| faded_at(x, y))
+                .max_by_key(|pixel| pixel[3])
+                .unwrap()
+        };
+        assert!(bright[3] > 60 && bright[3] < value[3], "{bright:?}");
+        assert!(faded_at(0, 0)[3] >= 1);
     }
 
     /// Readings as the taskbar shows them, for looking at the text and the
@@ -2008,16 +2224,16 @@ mod tests {
         let mut strips = Vec::new();
         for (height, style) in [48, 40].into_iter().flat_map(|height| {
             [
-                Style::Labels,
-                Style::Curves,
-                Style::Capsules,
-                Style::Figures,
+                look(Style::Labels),
+                look(Style::Curves),
+                look(Style::Capsules),
+                look(Style::Figures),
             ]
             .map(|style| (height, style))
         }) {
             let layout = lay_out(&groups, height, 1., style, &painter, None);
             for (light, background) in [(false, [28u8, 28, 30]), (true, [238, 238, 240])] {
-                let image = painter.paint(&layout, light, false, 1.).unwrap();
+                let image = painter.paint(&layout, light, 1.).unwrap();
                 strips.push((layout.width, layout.height, image, background));
             }
         }
