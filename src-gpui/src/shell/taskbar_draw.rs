@@ -208,7 +208,7 @@ pub(crate) struct Pill {
 }
 
 /// The monitor laid out at one size.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Layout {
     pub width: i32,
     pub height: i32,
@@ -217,10 +217,28 @@ pub(crate) struct Layout {
     pub pills: Vec<Pill>,
     /// The labels' text size, pixels.
     pub font: i32,
+    /// How much of the text and tiles shows, percent; the taskbar's own
+    /// background shows through the rest.
+    pub opacity: u8,
 }
 
-/// How the monitor shows its readings: the style, the text's size, and the
-/// labels' own choices (one row or two, values in their readings' colours).
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            runs: Vec::new(),
+            tiles: Vec::new(),
+            pills: Vec::new(),
+            font: 0,
+            opacity: 100,
+        }
+    }
+}
+
+/// How the monitor shows its readings: the style, the text's size, the
+/// labels' own choices (one row or two, values in their readings' colours),
+/// and its opacity.
 /// The size multiplies the sizes `size_scale` gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
@@ -230,6 +248,9 @@ pub struct Look {
     pub rows: u8,
     /// Labels' values in their reading's colour rather than the taskbar's.
     pub colored: bool,
+    /// How much of the text and tiles shows, percent; one of the
+    /// interface's monitor opacities.
+    pub opacity: u8,
 }
 
 impl Default for Look {
@@ -239,6 +260,7 @@ impl Default for Look {
             size: TaskbarSize::default(),
             rows: 2,
             colored: true,
+            opacity: 100,
         }
     }
 }
@@ -419,6 +441,7 @@ pub(crate) fn lay_out(
     let mut layout = Layout {
         height,
         font: font_size(scale),
+        opacity: look.opacity.clamp(60, 100),
         ..Layout::default()
     };
     layout.width = match style {
@@ -1261,6 +1284,16 @@ impl Painter {
                 colors.shade(run.shade),
             );
         }
+        // The monitor's opacity, scaling premultiplied pixels keeps colour
+        // and coverage in step; the taskbar shows through the rest.
+        let opacity = f32::from(layout.opacity.clamp(60, 100)) / 100.;
+        if opacity < 1. {
+            for pixel in &mut pixels {
+                for channel in pixel {
+                    *channel *= opacity;
+                }
+            }
+        }
         let mut bytes = Vec::with_capacity(pixels.len() * 4);
         for [r, g, b, a] in pixels {
             let byte = |v: f32| (v.clamp(0., 1.) * 255. + 0.5) as u8;
@@ -2089,6 +2122,41 @@ mod tests {
         assert!(value[3] > 200 && value[2] > value[0], "{value:?}");
         let name = strongest(&layout.runs[0]);
         assert!(name[3] > 120 && name[0] == name[2], "{name:?}");
+        // A lower opacity scales the same premultiplied pixels, so the text
+        // dims and the taskbar shows through without changing its colour.
+        let dim = lay_out(
+            &groups,
+            48,
+            1.25,
+            Look {
+                opacity: 60,
+                ..look(Style::Labels)
+            },
+            &painter,
+            None,
+        );
+        let faded = painter.paint(&dim, false, 1.25).unwrap();
+        let faded_at = |x: i32, y: i32| {
+            let index = ((y * dim.width + x) * 4) as usize;
+            [
+                faded[index],
+                faded[index + 1],
+                faded[index + 2],
+                faded[index + 3],
+            ]
+        };
+        // The brightest pixel of the dimmed value is about 60% of the
+        // opaque one, and still a pixel the window answers.
+        let bright = {
+            let right = dim.runs[1].x + painter.width(&dim.runs[1].text, dim.runs[1].size, true);
+            (dim.runs[1].baseline - dim.runs[1].size..dim.runs[1].baseline + 3)
+                .flat_map(|y| (dim.runs[1].x..right).map(move |x| (x, y)))
+                .map(|(x, y)| faded_at(x, y))
+                .max_by_key(|pixel| pixel[3])
+                .unwrap()
+        };
+        assert!(bright[3] > 60 && bright[3] < value[3], "{bright:?}");
+        assert!(faded_at(0, 0)[3] >= 1);
     }
 
     /// Readings as the taskbar shows them, for looking at the text and the

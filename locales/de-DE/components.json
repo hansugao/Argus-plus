@@ -240,6 +240,10 @@
       "medium": "Mittel",
       "large": "Groß"
     },
+    "opacity": {
+      "title": "Deckkraft",
+      "desc": "Deckkraft von Text und Kacheln der Taskleistenanzeige; das Fenster zeichnet keinen Hintergrund, die Taskleiste scheint durch."
+    },
     "rows": {
       "title": "Zeilen",
       "desc": "Beschriftungen stehen in zwei Zeilen oder einer; eine niedrige Taskleiste zeigt immer eine.",

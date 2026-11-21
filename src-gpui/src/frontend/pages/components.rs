@@ -1424,6 +1424,28 @@ impl Desktop {
                 .collect(),
             cx,
         );
+        let opacity = self.select(
+            "components-taskbar-opacity",
+            label("components.taskbar.opacity.title"),
+            MONITOR_OPACITIES
+                .iter()
+                .map(|value| format!("{value}%"))
+                .collect(),
+            MONITOR_OPACITIES
+                .iter()
+                .position(|value| *value == monitor.opacity),
+            false,
+            move |this, index, window, cx| {
+                this.request(
+                    command,
+                    json!({ "opacity": MONITOR_OPACITIES[index] }),
+                    Some("settings"),
+                    window,
+                    cx,
+                );
+            },
+            cx,
+        );
         let mut cards = vec![
             self.setting_text(
                 "taskbarMonitor",
@@ -1448,6 +1470,13 @@ impl Desktop {
                 "components.taskbar.size.title",
                 "components.taskbar.size.desc",
                 vec![size],
+            ),
+            self.setting_text(
+                "taskbarOpacity",
+                "OpacityIcon",
+                "components.taskbar.opacity.title",
+                "components.taskbar.opacity.desc",
+                vec![opacity],
             ),
         ];
         // One row or two, and the values' colours, are the labels style's

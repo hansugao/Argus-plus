@@ -1727,6 +1727,7 @@ impl Desktop {
             String::from(monitor.size),
             monitor.rows,
             monitor.colored,
+            monitor.opacity,
             light,
             scale.to_bits(),
         ));
@@ -1750,6 +1751,7 @@ impl Desktop {
                             size: monitor.size,
                             rows: monitor.rows,
                             colored: monitor.colored,
+                            opacity: monitor.opacity,
                         };
                         let (width, height, pixels) =
                             crate::shell::taskbar_preview(&groups, look, light, scale)?;

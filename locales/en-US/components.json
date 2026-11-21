@@ -240,6 +240,10 @@
       "medium": "Medium",
       "large": "Large"
     },
+    "opacity": {
+      "title": "Opacity",
+      "desc": "The opacity of the monitor's text and tiles. Its window draws no background, so the taskbar always shows through."
+    },
     "rows": {
       "title": "Rows",
       "desc": "Labels take two rows or one; a low taskbar always shows one.",

@@ -338,7 +338,7 @@ fn lenient_order<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Metric>, 
     Ok(order)
 }
 
-/// The window opacities the desktop monitor offers, percent.
+/// The window opacities the monitors offer, percent.
 pub const MONITOR_OPACITIES: [u8; 5] = [100, 90, 80, 70, 60];
 
 /// Settings stored by name: a name this version does not know reads as the
@@ -605,6 +605,9 @@ pub struct TaskbarMonitor {
     /// Values in their reading's colour rather than the taskbar's own, in
     /// the labels style; the other styles colour their values anyway.
     pub colored: bool,
+    /// How opaque the monitor is, percent; one of `MONITOR_OPACITIES`. The
+    /// taskbar's own background always shows through.
+    pub opacity: u8,
     /// The display whose taskbar it sits on, by what keeps that display
     /// apart across restarts (its monitor's device path); empty for the
     /// primary display, whichever that is. While that display is away or
@@ -625,6 +628,7 @@ impl Default for TaskbarMonitor {
             size: TaskbarSize::default(),
             rows: 2,
             colored: true,
+            opacity: 100,
             display: String::new(),
         }
     }
@@ -765,6 +769,9 @@ impl Settings {
         }
         if !MONITOR_OPACITIES.contains(&self.desktop_monitor.opacity) {
             self.desktop_monitor.opacity = 100;
+        }
+        if !MONITOR_OPACITIES.contains(&self.taskbar_monitor.opacity) {
+            self.taskbar_monitor.opacity = 100;
         }
     }
 
@@ -1050,17 +1057,19 @@ mod tests {
         assert_eq!(newer.taskbar_monitor.size, TaskbarSize::Medium);
         assert_eq!(newer.taskbar_monitor.rows, 2);
         assert!(newer.taskbar_monitor.colored);
+        assert_eq!(newer.taskbar_monitor.opacity, 100);
         assert!(newer.taskbar_monitor.display.is_empty());
         let styled: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"style": "figures"}}"#).unwrap();
         assert_eq!(styled.taskbar_monitor.style, TaskbarStyle::Figures);
         let sized: Settings = serde_json::from_str(
-            r#"{"taskbarMonitor": {"size": "large", "rows": 1, "colored": false}}"#,
+            r#"{"taskbarMonitor": {"size": "large", "rows": 1, "colored": false, "opacity": 70}}"#,
         )
         .unwrap();
         assert_eq!(sized.taskbar_monitor.size, TaskbarSize::Large);
         assert_eq!(sized.taskbar_monitor.rows, 1);
         assert!(!sized.taskbar_monitor.colored);
+        assert_eq!(sized.taskbar_monitor.opacity, 70);
         let unnamed: Settings =
             serde_json::from_str(r#"{"taskbarMonitor": {"size": "huge"}}"#).unwrap();
         assert_eq!(unnamed.taskbar_monitor.size, TaskbarSize::Medium);
@@ -1116,6 +1125,11 @@ mod tests {
         odd.migrate();
         assert_eq!(odd.desktop_monitor.opacity, 100);
         assert!(odd.desktop_monitor.locked);
+        let mut dim: Settings =
+            serde_json::from_str(r#"{"taskbarMonitor": {"opacity": 55, "rows": 1}}"#).unwrap();
+        dim.migrate();
+        assert_eq!(dim.taskbar_monitor.opacity, 100);
+        assert_eq!(dim.taskbar_monitor.rows, 1);
         // Everything round-trips.
         let saved = Settings {
             desktop_monitor: DesktopMonitor {
@@ -1146,6 +1160,7 @@ mod tests {
                 size: TaskbarSize::Large,
                 rows: 1,
                 colored: false,
+                opacity: 70,
                 display: r"\\?\DISPLAY#ACM0001#5&1&UID4353#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
                     .into(),
             },

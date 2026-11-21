@@ -830,6 +830,7 @@ pub fn apply_taskbar_monitor(app: &Host, monitor: &TaskbarMonitor) {
         size: monitor.size,
         rows: monitor.rows,
         colored: monitor.colored,
+        opacity: monitor.opacity,
     };
     if let Some(running) = running.as_ref() {
         running.look(monitor.place, look, monitor.display.clone());

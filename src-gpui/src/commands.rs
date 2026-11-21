@@ -658,8 +658,12 @@ pub fn set_taskbar_monitor(
     size: Option<TaskbarSize>,
     rows: Option<u8>,
     colored: Option<bool>,
+    opacity: Option<u8>,
     display: Option<String>,
 ) -> Result<SettingsView, String> {
+    if opacity.is_some_and(|value| !MONITOR_OPACITIES.contains(&value)) {
+        return Err(tr!("app.invalidRequest"));
+    }
     let saved = app
         .state::<SettingsStore>()
         .update(|s| {
@@ -687,6 +691,9 @@ pub fn set_taskbar_monitor(
             }
             if let Some(colored) = colored {
                 monitor.colored = colored;
+            }
+            if let Some(opacity) = opacity {
+                monitor.opacity = opacity;
             }
             if let Some(display) = display {
                 monitor.display = display;

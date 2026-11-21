@@ -240,6 +240,10 @@
       "medium": "Moyenne",
       "large": "Grande"
     },
+    "opacity": {
+      "title": "Opacité",
+      "desc": "Opacité du texte et des tuiles du moniteur de la barre des tâches ; la fenêtre ne dessine pas de fond, la barre des tâches reste donc visible."
+    },
     "rows": {
       "title": "Lignes",
       "desc": "Les étiquettes tiennent sur deux lignes ou une ; une barre basse n’en affiche qu’une.",

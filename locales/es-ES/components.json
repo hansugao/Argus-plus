@@ -240,6 +240,10 @@
       "medium": "Mediano",
       "large": "Grande"
     },
+    "opacity": {
+      "title": "Opacidad",
+      "desc": "Opacidad del texto y las tarjetas del monitor de la barra de tareas; la ventana no dibuja fondo, así que la barra de tareas siempre se ve por detrás."
+    },
     "rows": {
       "title": "Filas",
       "desc": "Las etiquetas ocupan dos filas o una; una barra baja siempre muestra una.",

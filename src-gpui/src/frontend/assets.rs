@@ -114,6 +114,7 @@ product_icons! {
     "PointerIcon" => MousePointer2,
     "ColumnsIcon" => Columns3,
     "FontSizeIcon" => ALargeSmall,
+    "OpacityIcon" => Droplet,
     "InterfaceScaleIcon" => ZoomIn,
     "GripIcon" => GripVertical,
     "PlusIcon" => Plus,

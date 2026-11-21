@@ -234,6 +234,7 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
             argument::<Option<TaskbarSize>>(&args, "size")?,
             argument::<Option<u8>>(&args, "rows")?,
             argument::<Option<bool>>(&args, "colored")?,
+            argument::<Option<u8>>(&args, "opacity")?,
             argument::<Option<String>>(&args, "display")?,
         )
         .map(|value| serde_json::to_value(value).expect("serializable command response"))
