@@ -11,11 +11,15 @@ pub(super) struct Update {
     pub closed: bool,
     /// What the icon shows (`tray_icon`).
     pub look: crate::settings::TrayIcon,
+    /// The runner's frame, wrapped into `tray_icon::FRAMES`.
+    pub frame: u8,
     /// The latest CPU load in percent, for a live icon.
     pub load: Option<u8>,
     /// The recent loads, oldest first, ending with `load`: the columns of the
     /// live icon that shows them.
     pub recent: [Option<u8>; super::tray_icon::RECENT],
+    /// Memory in use in percent; the runner's colour.
+    pub memory: Option<u8>,
     /// The taskbar is light (`SystemUsesLightTheme`).
     pub light: bool,
     /// The system tooltip shows on hover; off, the hover card does.
@@ -26,6 +30,17 @@ struct State {
     update: Update,
     revision: u64,
     done: bool,
+}
+
+/// How long the runner holds a frame at `load` percent: RunCat365's pace,
+/// `500 / max(1, load / 5)` ms, which tops out at 40 frames a second. Only
+/// the runner animates; every other look waits for a new sample.
+fn frame_interval(update: &Update) -> Option<Duration> {
+    if update.look != crate::settings::TrayIcon::Runner {
+        return None;
+    }
+    let rate = (f32::from(update.load.unwrap_or(0).min(100)) / 5.).max(1.);
+    Some(Duration::from_millis((500. / rate).round() as u64))
 }
 
 pub(super) struct Worker {
@@ -53,7 +68,20 @@ impl Worker {
                 loop {
                     let mut state = worker.0.lock().unwrap();
                     while !state.update.closed && state.revision == applied {
-                        state = worker.1.wait(state).unwrap();
+                        let Some(interval) = frame_interval(&state.update) else {
+                            state = worker.1.wait(state).unwrap();
+                            continue;
+                        };
+                        let (next, timeout) = worker.1.wait_timeout(state, interval).unwrap();
+                        state = next;
+                        // A frame was due and no other state arrived meanwhile:
+                        // show the next one.
+                        if timeout.timed_out() && state.revision == applied && !state.update.closed
+                        {
+                            state.update.frame =
+                                (state.update.frame + 1) % super::tray_icon::FRAMES as u8;
+                            state.revision = state.revision.wrapping_add(1);
+                        }
                     }
                     applied = state.revision;
                     let update = state.update.clone();
@@ -81,13 +109,15 @@ impl Worker {
         });
     }
 
-    /// A new sample: the tooltip and the load a live icon shows.
-    pub fn reading(&self, title: &str, load: u8) {
+    /// A new sample: the tooltip, the load a live icon shows, and the memory
+    /// use that colours the runner.
+    pub fn reading(&self, title: &str, load: u8, memory: u8) {
         self.update(|state| {
             if state.title != title {
                 state.title = title.to_owned();
             }
             state.load = Some(load);
+            state.memory = Some(memory);
             state.recent.rotate_left(1);
             *state.recent.last_mut().unwrap() = Some(load);
             true
@@ -99,6 +129,10 @@ impl Worker {
         self.update(|state| {
             if state.look == look && state.tip == tip {
                 return false;
+            }
+            // A newly chosen runner starts from its first frame.
+            if state.look != look {
+                state.frame = 0;
             }
             state.look = look;
             state.tip = tip;
@@ -169,6 +203,7 @@ impl Drop for Worker {
 mod tests {
     use super::{Update, Worker};
     use crate::settings::TrayIcon;
+    use crate::shell::tray_icon::FRAMES;
     use std::{
         sync::mpsc,
         time::{Duration, Instant},
@@ -202,7 +237,7 @@ mod tests {
             worker.title(&i.to_string());
         }
         for load in 0..=100 {
-            worker.reading("19999", load);
+            worker.reading("19999", load, load);
         }
         worker.style(TrayIcon::Number, true);
         worker.taskbar(true);
@@ -218,6 +253,7 @@ mod tests {
         assert_eq!(last.title, "19999");
         assert!(last.badge && last.generation == 1);
         assert_eq!(last.load, Some(100));
+        assert_eq!(last.memory, Some(100));
         // Readings sent while the shell was busy still reach the columns.
         assert_eq!(last.recent, [95, 96, 97, 98, 99, 100].map(Some));
         assert!(last.look == TrayIcon::Number && last.tip && last.light);
@@ -243,6 +279,86 @@ mod tests {
         worker.shutdown(Duration::from_millis(20));
         assert!(started.elapsed() < Duration::from_millis(200));
         release.send(()).unwrap();
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_runner_pace_follows_the_load_and_stops_at_forty_frames_a_second() {
+        let at = |look: TrayIcon, load: Option<u8>| {
+            super::frame_interval(&Update {
+                look,
+                load,
+                ..Update::default()
+            })
+        };
+        // RunCat365's pace: 500 / max(1, load / 5) ms.
+        assert_eq!(
+            at(TrayIcon::Runner, Some(100)),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(
+            at(TrayIcon::Runner, Some(50)),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            at(TrayIcon::Runner, Some(25)),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            at(TrayIcon::Runner, Some(0)),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(at(TrayIcon::Runner, None), Some(Duration::from_millis(500)));
+        // Every other look waits for the next sample.
+        for look in [
+            TrayIcon::Logo,
+            TrayIcon::Load,
+            TrayIcon::Share,
+            TrayIcon::Number,
+        ] {
+            assert_eq!(at(look, Some(100)), None, "{look:?}");
+        }
+    }
+
+    #[test]
+    fn the_runner_advances_frames_without_new_samples() {
+        let (seen, frames) = mpsc::channel();
+        let worker = Worker::spawn(
+            Update {
+                look: TrayIcon::Runner,
+                load: Some(100),
+                ..Update::default()
+            },
+            move |update| seen.send(update.frame).unwrap(),
+        )
+        .unwrap();
+        let mut drawn = Vec::new();
+        while drawn.len() < 4 {
+            drawn.push(frames.recv_timeout(Duration::from_secs(2)).unwrap());
+        }
+        worker.shutdown(Duration::from_secs(1));
+        // The first frame, then the next ones in order and wrapped.
+        assert_eq!(drawn[0], 0);
+        for pair in drawn.windows(2) {
+            assert_eq!(pair[1], (pair[0] + 1) % FRAMES as u8);
+        }
+    }
+
+    #[test]
+    fn a_still_icon_does_not_repaint_without_a_new_sample() {
+        let (seen, frames) = mpsc::channel();
+        let worker = Worker::spawn(
+            Update {
+                look: TrayIcon::Load,
+                load: Some(100),
+                ..Update::default()
+            },
+            move |update| seen.send(update.frame).unwrap(),
+        )
+        .unwrap();
+        frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Well past the runner's fastest frame: a still icon stays put.
+        assert!(frames.recv_timeout(Duration::from_millis(200)).is_err());
         worker.shutdown(Duration::from_secs(1));
     }
 }
