@@ -847,6 +847,7 @@ impl Desktop {
                         Some(label("onboarding.background.autostartHint")),
                         self.setting_toggle(
                             "onboarding-autostart",
+                            "onboarding.background.autostart",
                             boolean(&settings, "autostart"),
                             "set_autostart",
                             "enabled",
@@ -859,6 +860,7 @@ impl Desktop {
                         Some(label("onboarding.background.closeToTrayHint")),
                         self.setting_toggle(
                             "onboarding-tray",
+                            "onboarding.background.closeToTray",
                             boolean(&settings, "closeToTray"),
                             "set_close_to_tray",
                             "value",
@@ -869,12 +871,12 @@ impl Desktop {
                     .child(self.onboarding_row(
                         label("onboarding.background.minimizedInterval"),
                         Some(label("onboarding.background.minimizedIntervalHint")),
-                        self.background_select("onboarding", "minimized", cx),
+                        self.background_select("onboarding", "minimized", false, cx),
                     ))
                     .child(self.onboarding_row(
                         label("onboarding.background.trayInterval"),
                         Some(label("onboarding.background.trayIntervalHint")),
-                        self.background_select("onboarding", "tray", cx),
+                        self.background_select("onboarding", "tray", false, cx),
                     ))
                     .child(match problem {
                         Some(problem) => self.onboarding_note(problem, true),

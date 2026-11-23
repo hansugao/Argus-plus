@@ -25,6 +25,8 @@ pub(super) struct NameFacts {
     /// Startup name dimming and the missing-target badge, respectively.
     pub startup_disabled: bool,
     pub startup_missing: bool,
+    /// The leak alert the row carries (`leaks::row_kind`).
+    pub leak: Option<&'static str>,
 }
 
 impl NameFacts {
@@ -35,6 +37,9 @@ impl NameFacts {
             efficiency_count += usize::from(boolean(member, "efficiency"));
             all_suspended &= boolean(member, "suspended");
         }
+        let members = row.raw["connectionCount"]
+            .as_u64()
+            .map_or(row.members.len(), |n| n as usize);
         Self {
             efficiency_count,
             all_suspended,
@@ -43,11 +48,12 @@ impl NameFacts {
                 && row.raw["path"].is_null()
                 && row.members.len() <= 1,
             icon_id: icon_id(&row.raw),
-            members: row.members.len(),
-            member_count: row.members.len().to_string().into(),
+            members,
+            member_count: members.to_string().into(),
             entry_count: row.raw["entryCount"].to_string().into(),
             startup_disabled: !boolean(&row.raw, "enabled"),
             startup_missing: !boolean(&row.raw, "exists") && !row.raw["path"].is_null(),
+            leak: crate::frontend::leaks::row_kind(&row.members),
         }
     }
 }
@@ -160,7 +166,12 @@ impl CellSpec {
                 spec.hint_area = HintArea::Text;
             }
             CellKind::StartType => {
-                spec.color = match text(&row.raw, "startType") {
+                // A start type pending a restart shows as what it will be.
+                let start = match text(&row.raw, "pendingStartType") {
+                    "" => text(&row.raw, "startType"),
+                    pending => pending,
+                };
+                spec.color = match start {
                     "manual" => Some(p.faint),
                     "disabled" => Some(p.io),
                     _ => None,
@@ -180,6 +191,13 @@ impl CellSpec {
                     && row.members.iter().any(|member| boolean(member, "stale"));
                 if dim || delayed {
                     spec.color = Some(p.faint);
+                }
+                // The count a handle leak alert is about, in its amber.
+                if processes
+                    && field.key == "handles"
+                    && row.members.iter().any(|m| text(m, "leak") == "handles")
+                {
+                    spec.color = Some(p.io);
                 }
                 if processes
                     && matches!(
@@ -408,6 +426,8 @@ impl NativeTable {
                     }))
                     .child(value);
             }
+            // A program's heading has no state of its own.
+            CellKind::ConnectionState if row.expandable => {}
             CellKind::ConnectionState => {
                 let state = text(&row.raw, "state");
                 element = element.gap(px(7.)).child(dot(match state {
@@ -586,6 +606,16 @@ impl NativeTable {
             }
             // The busiest engine, which the figure is the share of.
             ("processes", "gpu") => row.gpu_usage().engine.clone().filter(|e| !e.is_empty()),
+            // Why the count is in amber.
+            ("processes", "handles")
+                if row.members.iter().any(|m| text(m, "leak") == "handles") =>
+            {
+                let owner = self.owner.upgrade()?;
+                let app = owner.read(cx);
+                app.row_leak(&row.members)
+                    .filter(|leak| text(leak, "kind") == "handles")
+                    .map(crate::frontend::leaks::describe)
+            }
             ("processes", "net") => {
                 let owner = self.owner.upgrade()?;
                 let bits = owner
@@ -808,8 +838,14 @@ impl NativeTable {
                 ));
         }
         let processes = self.page == "processes";
+        // Connections gathered under their programs fold as process groups do.
+        let grouped = self.page == "network"
+            && self
+                .owner
+                .upgrade()
+                .is_some_and(|owner| owner.read(cx).connection_view == "apps");
         let mut element = element.gap_2();
-        if processes {
+        if processes || grouped {
             element = element.pl(px(6. + inset + row.depth as f32 * 20.));
             element = if row.expandable {
                 // The button carries the margin itself: a wrapper for it would
@@ -837,7 +873,7 @@ impl NativeTable {
                     .into_any_element()
             });
         }
-        let group = processes && facts.members > 1;
+        let group = (processes || grouped) && facts.members > 1;
         let off = self.page == "startup" && facts.startup_disabled;
         let name = plain_text(row.title.clone())
             .min_w_0()
@@ -931,6 +967,23 @@ impl NativeTable {
             if facts.all_suspended {
                 element =
                     element.child(tag(label("processes.suspended"), p.stroke_strong, p.muted));
+            }
+            // A leak alert: the kind in amber, what it rests on under the pointer.
+            if let Some(kind) = facts.leak {
+                let mark = tag(
+                    crate::frontend::leaks::tag_label(kind),
+                    p.io.opacity(0.55),
+                    p.io,
+                );
+                let why = near
+                    .then(|| {
+                        let owner = self.owner.upgrade()?;
+                        let app = owner.read(cx);
+                        app.row_leak(&row.members)
+                            .map(crate::frontend::leaks::describe)
+                    })
+                    .flatten();
+                element = element.child(hint(mark, "leak", why));
             }
         }
         if self.page == "startup" && facts.startup_missing {

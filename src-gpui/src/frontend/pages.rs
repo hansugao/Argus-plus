@@ -4,10 +4,10 @@ pub(in crate::frontend) mod components;
 mod details;
 pub(in crate::frontend) mod history;
 pub(in crate::frontend) mod performance;
-mod process_watch;
 pub(in crate::frontend) mod section_rail;
 mod settings;
 mod vitals;
+pub(in crate::frontend) mod watch;
 use super::*;
 pub(super) use details::{cpu_time, date_time};
 use gpui_kit::component::ActiveTheme;
@@ -295,6 +295,11 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         match key {
+            caption::KEEP_ON_TOP => {
+                self.keep_on_top(value.as_bool().unwrap_or(false));
+                cx.notify();
+                return;
+            }
             "hideSystem.processes" | "hideSystem.network" => {
                 self.prefs.set(key, value.as_bool().unwrap_or(false));
                 self.rebuild_rows(false, cx);
@@ -308,6 +313,15 @@ impl Desktop {
                     self.rebuild_rows(self.holds_order(), cx);
                 }
                 cx.notify();
+                return;
+            }
+            // Leak alerts apply to the sample on screen at once.
+            leaks::ALERTS => {
+                self.set_leak_alerts(value.as_bool().unwrap_or(true), cx);
+                return;
+            }
+            leaks::IGNORED => {
+                self.set_ignored_leaks(serde_json::from_value(value).unwrap_or_default(), cx);
                 return;
             }
             model::USER_GROUPING => {
@@ -457,6 +471,19 @@ impl Desktop {
                 return;
             }
             "diskPage" => self.disk_page = value.as_str().unwrap_or("overview").into(),
+            "historyPage" => {
+                let next = if value.as_str() == Some("watch") {
+                    "watch"
+                } else {
+                    "system"
+                };
+                if self.set_history_page(next) && self.page == "history" {
+                    self.load_history(window, cx);
+                }
+                cx.notify();
+                return;
+            }
+            DISK_RAW_HEX => self.disk_raw_hex = value.as_bool().unwrap_or(false),
             "refreshDiskDetails" => {
                 if let Some(index) = value.as_u64() {
                     self.read_disk_details(index, window, cx);

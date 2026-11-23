@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::channel::Channel;
 use argus_core::history::{self, HistoryRecorder};
 use argus_core::power::PowerTracker;
-use argus_core::watch::{WatchAction, WatchError, WatchRecorder, WatchView};
+use argus_core::watch::{SeriesQuery, WatchAction, WatchError, WatchRecorder, WatchView};
 use argus_core::{Collector, Snapshot};
 use argus_service::{DiskClient, NetworkClient, RuleRunner, SensorClient};
 
@@ -66,6 +66,13 @@ pub enum Control {
     SetWindowProbe(Probe),
     /// Starts recording history into this folder, or stops with None.
     SetHistoryDir(Option<PathBuf>),
+    SetHistoryOptions(PathBuf, history::HistoryOptions),
+    /// Close both writers and acknowledge after maintenance has quiesced.
+    PauseHistory(Sender<()>),
+    ResumeWatch {
+        dir: PathBuf,
+        keep_observation: bool,
+    },
     /// Deletes the history in this folder; replies once the files are gone.
     /// Goes through this thread so no frame is being written meanwhile.
     ClearHistory(PathBuf, Sender<io::Result<()>>),
@@ -74,8 +81,94 @@ pub enum Control {
         WatchAction,
         Sender<Result<Option<WatchView>, WatchError>>,
     ),
+    /// One observed run's readings over a window, for the observation page.
+    WatchSeries(
+        PathBuf,
+        SeriesQuery,
+        Sender<Result<history::HistorySeries, WatchError>>,
+    ),
 }
 
+fn maintenance_due(previous: Option<(i64, Instant)>, day: i64, now: Instant) -> bool {
+    previous.is_none_or(|(old, time)| {
+        old != day || now.saturating_duration_since(time) >= Duration::from_secs(3600)
+    })
+}
+enum MaintenanceJob {
+    Run(PathBuf, history::HistoryOptions, i64, u64),
+    Barrier(Sender<()>),
+}
+struct Maintenance {
+    tx: Sender<MaintenanceJob>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+impl Maintenance {
+    fn start() -> Self {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        let (tx, rx) = mpsc::channel();
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let current = generation.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("argus-history-maintenance".into())
+            .spawn(move || {
+                if let Err(e) =
+                    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) }
+                {
+                    argus_core::diagnostics::warn(
+                        "history worker priority",
+                        format!("HRESULT={:#x}", e.code().0),
+                    );
+                }
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        MaintenanceJob::Run(path, options, day, version) => {
+                            let cancelled =
+                                || current.load(std::sync::atomic::Ordering::Acquire) != version;
+                            if !cancelled()
+                                && let Err(e) =
+                                    history::maintain_until(&path, options, day, cancelled)
+                            {
+                                argus_core::diagnostics::file_failure(
+                                    "history maintenance",
+                                    &path,
+                                    &e,
+                                );
+                            }
+                        }
+                        MaintenanceJob::Barrier(reply) => {
+                            let _ = reply.send(());
+                        }
+                    }
+                }
+            })
+        {
+            argus_core::diagnostics::warn("history worker", argus_core::diagnostics::io(&e));
+        }
+        Self { tx, generation }
+    }
+    fn run(&self, dir: PathBuf, options: history::HistoryOptions, day: i64) {
+        let generation = self
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .wrapping_add(1);
+        let _ = self
+            .tx
+            .send(MaintenanceJob::Run(dir, options, day, generation));
+    }
+    fn barrier(&self, reply: Sender<()>) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self
+            .tx
+            .send(MaintenanceJob::Barrier(reply.clone()))
+            .is_err()
+        {
+            let _ = reply.send(());
+        }
+    }
+}
 pub struct Sampler {
     tx: Sender<Control>,
 }
@@ -214,6 +307,10 @@ impl Sampler {
                 let mut window: Option<Probe> = None;
                 let mut history: Option<HistoryRecorder> = None;
                 let mut watch: Option<WatchRecorder> = None;
+                let mut suspended_watch = None;
+                let maintenance = Maintenance::start();
+                let mut history_options = history::HistoryOptions::default();
+                let mut last_maintenance: Option<(i64, Instant)> = None;
                 let mut interval = DEFAULT_INTERVAL;
                 let mut minimized = BACKGROUND_INTERVAL;
                 let mut tray = BACKGROUND_INTERVAL;
@@ -266,12 +363,54 @@ impl Sampler {
                             window = Some(probe);
                             continue;
                         }
+                        Ok(Control::SetHistoryOptions(dir, options)) => {
+                            history_options = options;
+                            if let Some(rec) = &mut history {
+                                rec.configure(options.recording);
+                            }
+                            let day = history
+                                .as_ref()
+                                .and_then(HistoryRecorder::active_day)
+                                .unwrap_or(i64::MIN);
+                            maintenance.run(dir, options, day);
+                            last_maintenance = Some((day, Instant::now()));
+                            continue;
+                        }
+                        Ok(Control::PauseHistory(reply)) => {
+                            drop(history.take());
+                            suspended_watch = watch.take().map(WatchRecorder::suspend);
+                            last_maintenance = None;
+                            maintenance.barrier(reply);
+                            continue;
+                        }
+                        Ok(Control::ResumeWatch {
+                            dir,
+                            keep_observation,
+                        }) => {
+                            if let Some(resume) =
+                                suspended_watch.take().filter(|_| keep_observation)
+                            {
+                                watch = resume(dir)
+                                    .inspect_err(|_| {
+                                        argus_core::diagnostics::warn(
+                                            "history observation resume",
+                                            "storage unavailable",
+                                        )
+                                    })
+                                    .ok();
+                            }
+                            continue;
+                        }
                         Ok(Control::SetHistoryDir(dir)) => {
                             if history.as_ref().map(HistoryRecorder::directory) != dir.as_deref() {
                                 if let Some(mut recorder) = history.take() {
                                     recorder.stop(dir.is_none());
                                 }
-                                history = dir.map(HistoryRecorder::start);
+                                history = dir.map(|p| {
+                                    let mut rec = HistoryRecorder::start(p);
+                                    rec.configure(history_options.recording);
+                                    rec
+                                });
                             }
                             continue;
                         }
@@ -287,6 +426,19 @@ impl Sampler {
                                     result
                                 })
                             };
+                            let _ = reply.send(result);
+                            continue;
+                        }
+                        Ok(Control::WatchSeries(dir, query, reply)) => {
+                            // A saved observation is read as `Watch` reads it,
+                            // unless it waits to resume after a folder move.
+                            if watch.is_none() && suspended_watch.is_none() {
+                                watch = WatchRecorder::open(dir).ok();
+                            }
+                            let result =
+                                watch.as_ref().map_or(Err(WatchError::Missing), |recorder| {
+                                    recorder.series(&query)
+                                });
                             let _ = reply.send(result);
                             continue;
                         }
@@ -338,9 +490,15 @@ impl Sampler {
                     rules.observe(&snapshot.processes);
                     if let Some(recorder) = &mut history {
                         recorder.record(&snapshot);
+                        if let Some(day) = recorder.active_day()
+                            && maintenance_due(last_maintenance, day, Instant::now())
+                        {
+                            maintenance.run(recorder.directory().into(), history_options, day);
+                            last_maintenance = Some((day, Instant::now()));
+                        }
                     }
                     if let Some(recorder) = &mut watch
-                        && recorder.record(&snapshot).is_err()
+                        && recorder.record_at_interval(&snapshot, stale_after).is_err()
                     {
                         argus_core::diagnostics::warn(
                             "process observation",
@@ -420,6 +578,24 @@ mod tests {
             &mut pending,
             Some(requested + Duration::from_secs(5))
         ));
+    }
+
+    #[test]
+    fn history_maintenance_is_due_at_start_rollover_and_hourly() {
+        let start = Instant::now();
+        let previous = Some((100, start));
+        assert!(maintenance_due(None, 100, start));
+        assert!(!maintenance_due(
+            previous,
+            100,
+            start + Duration::from_secs(3599)
+        ));
+        assert!(maintenance_due(
+            previous,
+            100,
+            start + Duration::from_secs(3600)
+        ));
+        assert!(maintenance_due(previous, 101, start));
     }
 
     #[test]

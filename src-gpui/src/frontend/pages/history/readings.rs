@@ -107,6 +107,10 @@ pub(super) struct Reading {
     pub(super) process: Option<&'static str>,
     /// Recorded in the history at hand, or one of the base readings.
     pub(super) recorded: bool,
+    /// A device's reading: the device's name, and the reading's own short
+    /// name ("Active time"), which the chooser lists under the device.
+    pub(super) device: Option<String>,
+    pub(super) part: Option<String>,
 }
 
 /// The channels one query needs to draw `reading`.
@@ -144,7 +148,15 @@ impl Reading {
             service: false,
             process: None,
             recorded: false,
+            device: None,
+            part: None,
         }
+    }
+    /// A reading of device `name`, `part` its locale key under `history.devicePart`.
+    fn of_device(mut self, name: &str, part: &str) -> Self {
+        self.device = Some(name.to_owned());
+        self.part = Some(label(&format!("history.devicePart.{part}")));
+        self
     }
     fn pair(mut self, a: &str, b: &str, parts: (&str, &str)) -> Self {
         self.keys = vec![a.into(), b.into()];
@@ -166,7 +178,7 @@ impl Reading {
 
     /// The channel drawn as the main line: a pair's first part, or the
     /// combined channel of older records.
-    fn main_key<'a>(&'a self, points: &Points) -> &'a str {
+    pub(super) fn main_key<'a>(&'a self, points: &Points) -> &'a str {
         match &self.fallback {
             Some(fallback) if !points.has(&self.keys[0]) && points.has(fallback) => fallback,
             _ => &self.keys[0],
@@ -200,12 +212,22 @@ impl Reading {
         ))
     }
 
-    /// The highest sample inside point `i` when it covers several (CPU's peak).
+    /// The highest reading inside point `i` when it covers several: CPU's
+    /// highest sample, or a percentage's highest record.
     pub(super) fn peak_value(&self, points: &Points, i: usize) -> Option<f64> {
-        let key = self.peak.as_deref()?;
-        points
-            .value(key, Part::High, i)
-            .or_else(|| points.value(key, Part::Mean, i))
+        if let Some(key) = self.peak.as_deref().filter(|key| points.has(key)) {
+            return points
+                .value(key, Part::High, i)
+                .or_else(|| points.value(key, Part::Mean, i));
+        }
+        (self.unit == Unit::Percent && !self.is_pair())
+            .then(|| points.value(&self.keys[0], Part::High, i))
+            .flatten()
+    }
+
+    /// Whether the title shows a highest value beside the reading's own.
+    pub(super) fn shows_peak(&self) -> bool {
+        self.peak.is_some() || (self.unit == Unit::Percent && !self.is_pair())
     }
 
     /// What the axis spans for the points drawn in `from..=to`.
@@ -575,7 +597,8 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
                 &key("write"),
                 ("history.part.read", "history.part.write"),
             )
-            .process("disk");
+            .process("disk")
+            .of_device(&name, "diskOf");
             pair.recorded = true;
             out.push(pair);
         }
@@ -612,7 +635,8 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
                     color,
                     unit,
                     axis,
-                );
+                )
+                .of_device(&name, text.trim_start_matches("history.device."));
                 reading.recorded = true;
                 out.push(reading);
             }
@@ -651,7 +675,7 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
         let mut pair = Reading::new(
             &format!("nic.{id}"),
             name.clone(),
-            tr!("history.device.nicOf", name = name),
+            tr!("history.device.nicOf", name = name.clone()),
             Group::Network,
             p.network,
             Unit::NetworkRate,
@@ -662,7 +686,8 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
             &format!("nic.{id}.send"),
             ("history.part.receive", "history.part.send"),
         )
-        .process("net");
+        .process("net")
+        .of_device(&name, "nicOf");
         pair.recorded = true;
         out.push(pair);
     }
@@ -775,7 +800,11 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
                 unit,
                 axis,
             )
-            .process("gpu");
+            .process("gpu")
+            .of_device(
+                &adapter.map_or_else(|| number.clone(), |adapter| format!("{number} · {adapter}")),
+                text.trim_start_matches("history.device."),
+            );
             reading.total = total.map(&key);
             reading.recorded = true;
             out.push(reading);
@@ -842,6 +871,140 @@ pub(super) fn catalogue(channels: &[Channel], p: &Palette) -> Vec<Reading> {
 
 /// The tabs: CPU, memory, disk, network, GPU (each adapter when there are
 /// several), battery when recorded.
+/// What an observed process's run records (`argus_core::watch::WatchPoint`),
+/// as readings: memory, processor, graphics, I/O and counts, in that order.
+pub(super) fn watch_catalogue(p: &Palette) -> Vec<Reading> {
+    let column = |id: &str| label(&format!("history.column.moment.{id}"));
+    let long = |id: &str| label(&format!("history.reading.long.{id}"));
+    let reading = |id: &str, name: String, long: String, group, color, unit, axis| {
+        let mut reading = Reading::new(id, name, long, group, color, unit, axis);
+        reading.recorded = true;
+        reading
+    };
+    let memory = label("history.watch.metric.memory");
+    let commit = label("history.watch.metric.commit");
+    let working = label("details.workingSet");
+    vec![
+        reading(
+            "memory",
+            memory.clone(),
+            memory,
+            Group::Memory,
+            p.memory,
+            Unit::Bytes,
+            Axis::Auto,
+        ),
+        reading(
+            "commit",
+            commit.clone(),
+            commit,
+            Group::Memory,
+            p.cpu,
+            Unit::Bytes,
+            Axis::Auto,
+        ),
+        reading(
+            "workingSet",
+            working.clone(),
+            working,
+            Group::Memory,
+            p.cpu_e,
+            Unit::Bytes,
+            Axis::Auto,
+        ),
+        reading(
+            "cpu",
+            column("cpu"),
+            long("cpu"),
+            Group::Cpu,
+            p.cpu,
+            Unit::Percent,
+            Axis::Percent,
+        ),
+        reading(
+            "gpu",
+            column("gpu"),
+            long("gpu"),
+            Group::Gpu,
+            p.gpu,
+            Unit::Percent,
+            Axis::Percent,
+        ),
+        reading(
+            "gpuMemory",
+            column("gpuMem"),
+            column("gpuMem"),
+            Group::Gpu,
+            p.npu,
+            Unit::Bytes,
+            Axis::Auto,
+        ),
+        reading(
+            "disk",
+            column("disk"),
+            long("disk"),
+            Group::Disk,
+            p.io,
+            Unit::Rate,
+            Axis::Auto,
+        )
+        .pair(
+            "diskRead",
+            "diskWrite",
+            ("history.part.read", "history.part.write"),
+        ),
+        reading(
+            "io",
+            column("io"),
+            column("io"),
+            Group::Disk,
+            p.battery,
+            Unit::Rate,
+            Axis::Auto,
+        )
+        .pair(
+            "ioRead",
+            "ioWrite",
+            ("history.part.read", "history.part.write"),
+        ),
+        reading(
+            "net",
+            column("net"),
+            long("network"),
+            Group::Network,
+            p.network,
+            Unit::NetworkRate,
+            Axis::Auto,
+        )
+        .pair(
+            "netReceived",
+            "netSent",
+            ("history.part.receive", "history.part.send"),
+        ),
+        reading(
+            "threads",
+            column("threads"),
+            long("threads"),
+            Group::System,
+            p.accent,
+            Unit::Count,
+            Axis::Count,
+        ),
+        reading(
+            "handles",
+            column("handles"),
+            long("handles"),
+            Group::System,
+            p.temperature,
+            Unit::Count,
+            Axis::Count,
+        ),
+    ]
+}
+
+/// The observation's tabs; its other readings are in the chooser.
+pub(super) const WATCH_TABS: [&str; 6] = ["memory", "commit", "cpu", "gpu", "disk", "net"];
+
 pub(super) fn tab_ids(readings: &[Reading]) -> Vec<String> {
     let mut ids = vec![
         "cpu".to_owned(),

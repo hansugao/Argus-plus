@@ -2,7 +2,8 @@
 //! layered window, in one of four styles (`TaskbarStyle`):
 //!
 //! - labels: short readings in columns of two rows (one on a taskbar too low
-//!   for two), each a name on the left and its value on the right;
+//!   for two), each a name in its device's colour on the left and its value
+//!   on the right;
 //! - curves: a tile per reading, its name and value over its recent curve in
 //!   its device's colour;
 //! - capsules: a rounded capsule per reading in one row, a dot in its
@@ -109,18 +110,10 @@ pub(crate) struct Group {
     pub history: Vec<f32>,
 }
 
-/// Arranges the groups in columns of `rows` cells: a group's cells stay
-/// together, and single cells share a column in order.
-#[cfg(test)]
-pub(crate) fn columns(groups: &[Group], rows: usize) -> Vec<Vec<&Cell>> {
-    stacks(groups, rows)
-        .into_iter()
-        .map(|column| column.into_iter().map(|(cell, _)| cell).collect())
-        .collect()
-}
-
-/// `columns`, each cell with the group it is of.
-fn stacks(groups: &[Group], rows: usize) -> Vec<Vec<(&Cell, &Group)>> {
+/// Arranges the groups in columns of `rows` cells, each cell with the group
+/// it is of: a group's cells stay together, and single cells share a column
+/// in order.
+fn columns(groups: &[Group], rows: usize) -> Vec<Vec<(&Cell, &Group)>> {
     let mut columns: Vec<Vec<(&Cell, &Group)>> = Vec::new();
     // The column a single cell opened, which the next single cell fills.
     let mut open: Option<usize> = None;
@@ -471,13 +464,14 @@ fn labels(
     let baseline = ((line as f32 + fonts.cap(font)) / 2.).round() as i32;
     let (pad, inner, gap) = (px(8.), px(7.), px(12.));
     let mut x = pad;
-    let columns = stacks(groups, rows);
+    let columns = columns(groups, rows);
     for (index, column) in columns.iter().enumerate() {
         if index > 0 {
             x += gap;
         }
-        // Names are plain here: a parameter goes by its own name only
-        // under (or in one row, after) a reading of its device.
+        // A parameter goes by its own name only under (or in one row,
+        // after) a reading of its device: a column's first name names its
+        // device.
         let tags = column
             .iter()
             .enumerate()
@@ -525,14 +519,22 @@ fn labels(
         {
             let y = top + row as i32 * line + baseline;
             if !tag.is_empty() {
+                // In its device's colour even when the value is amber, as a
+                // figure's name. A reading of no device (an uptime) has no
+                // colour to take: its name stays a plain one's quieter ink,
+                // apart from its value of the same size.
+                let (paint, shade) = match group.tone {
+                    Tone::Plain => (Paint::Ink, Shade::Name),
+                    tone => (Paint::Tone(tone), Shade::Full),
+                };
                 layout.runs.push(Run {
                     text: tag.clone(),
                     x,
                     baseline: y,
                     size: font,
                     value: false,
-                    paint: Paint::Ink,
-                    shade: Shade::Name,
+                    paint,
+                    shade,
                 });
             }
             let paint = if cell.high {
@@ -1641,10 +1643,10 @@ mod tests {
         }
     }
 
-    fn names(columns: &[Vec<&Cell>]) -> Vec<Vec<String>> {
+    fn names(columns: &[Vec<(&Cell, &Group)>]) -> Vec<Vec<String>> {
         columns
             .iter()
-            .map(|column| column.iter().map(|cell| cell.label.clone()).collect())
+            .map(|column| column.iter().map(|(cell, _)| cell.label.clone()).collect())
             .collect()
     }
 
@@ -1927,8 +1929,8 @@ mod tests {
                 "{style:?}"
             );
         }
-        // In plain names, two rows: only under its device's reading; the
-        // GPU's temperature opens a column of its own and names the GPU.
+        // In labels, two rows: only under its device's reading; the GPU's
+        // temperature opens a column of its own and names the GPU.
         let labels = lay_out(&groups, 48, 1., look(Style::Labels), &Even, None);
         let names = labels
             .runs
@@ -1960,13 +1962,68 @@ mod tests {
                 .iter()
                 .all(|run| run.paint == Paint::High)
         );
-        let capsules = lay_out(&[busy], 48, 1., look(Style::Capsules), &Even, None);
+        let capsules = lay_out(&[busy.clone()], 48, 1., look(Style::Capsules), &Even, None);
         assert_eq!(capsules.pills[0].paint, Paint::Tone(Tone::Gpu));
         assert!(
             values(&capsules.runs)
                 .iter()
                 .all(|run| run.paint == Paint::High)
         );
+        // Labels name it in its colour too, as strongly as figures do.
+        let labels = lay_out(&[busy], 48, 1., look(Style::Labels), &Even, None);
+        assert_eq!(
+            (labels.runs[0].paint, labels.runs[0].shade),
+            (Paint::Tone(Tone::Gpu), Shade::Full)
+        );
+        assert!(
+            values(&labels.runs)
+                .iter()
+                .all(|run| run.paint == Paint::High)
+        );
+    }
+
+    #[test]
+    fn labels_name_a_reading_in_its_colour_and_one_of_no_device_plainly() {
+        let mut uptime = single("Up", "5 d 14 h");
+        uptime.tone = Tone::Plain;
+        let groups = vec![single("CPU", "41%"), rates("1 KB/s", "2 KB/s"), uptime];
+        // Two rows, and one on a low taskbar.
+        for height in [48, 30] {
+            let layout = lay_out(
+                &groups,
+                height,
+                1.,
+                Look {
+                    colored: false,
+                    ..look(Style::Labels)
+                },
+                &Even,
+                None,
+            );
+            let mut names = layout
+                .runs
+                .iter()
+                .filter(|run| !run.value)
+                .map(|run| (run.text.as_str(), run.paint, run.shade))
+                .collect::<Vec<_>>();
+            names.sort_by_key(|(text, ..)| *text);
+            assert_eq!(
+                names,
+                [
+                    ("CPU", Paint::Tone(Tone::Cpu), Shade::Full),
+                    ("Up", Paint::Ink, Shade::Name),
+                    ("↑", Paint::Tone(Tone::Network), Shade::Full),
+                    ("↓", Paint::Tone(Tone::Network), Shade::Full),
+                ],
+                "{height}"
+            );
+            // The values keep the text's own colour.
+            assert!(
+                values(&layout.runs)
+                    .iter()
+                    .all(|run| run.paint == Paint::Ink)
+            );
+        }
     }
 
     #[test]

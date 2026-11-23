@@ -40,6 +40,11 @@ pub enum ActionError {
     /// service speaks another protocol and refused it: updating the service
     /// lets it act again. Only the host reports it; the service never sends it.
     ServiceOutdated,
+    /// Denied although Argus acted with administrator rights (elevated, or
+    /// through the privileged service): the target guards itself, so advising
+    /// those rights is no help. Only the host reports it, for service
+    /// changes; the service never sends it.
+    AccessDeniedPrivileged,
     /// Resuming could not be confirmed: every thread is still suspended
     /// (another tool suspended the process more than once, so it needs
     /// another resume), or the thread states could not be read.
@@ -68,6 +73,7 @@ impl ActionError {
             Self::CriticalityUnknown => "process criticality could not be checked".into(),
             Self::Refused => "operation refused by policy".into(),
             Self::ServiceOutdated => "privileged service protocol incompatible".into(),
+            Self::AccessDeniedPrivileged => "access denied with administrator rights".into(),
             Self::StillSuspended => "threads remain suspended or unreadable after resume".into(),
             Self::Os(message) => crate::diagnostics::failure(message),
         }
@@ -415,10 +421,13 @@ const SETTLE: Duration = Duration::from_millis(250);
 /// Image names whose stall cannot be undone from Argus, though Windows does
 /// not mark them critical: the Desktop Window Manager (the whole screen,
 /// Argus's window included, stops updating) and Argus's own privileged
-/// service (`argus-service-<pid>-<stamp>.exe`, which every Argus waits on).
+/// service (`argus-service.exe`, or `argus-service-<pid>-<stamp>.exe` as
+/// Argus 0.5 and earlier named it), which every Argus waits on.
 fn essential_image(name: &str) -> bool {
     let name = name.to_lowercase();
-    name == "dwm.exe" || (name.starts_with("argus-service-") && name.ends_with(".exe"))
+    name == "dwm.exe"
+        || name == "argus-service.exe"
+        || (name.starts_with("argus-service-") && name.ends_with(".exe"))
 }
 
 /// The file name of the process's image, from a handle with limited query rights.
@@ -771,7 +780,12 @@ mod tests {
 
     #[test]
     fn the_desktop_window_manager_and_argus_service_are_essential() {
-        for name in ["dwm.exe", "DWM.EXE", "argus-service-123-456.exe"] {
+        for name in [
+            "dwm.exe",
+            "DWM.EXE",
+            "argus-service.exe",
+            "argus-service-123-456.exe",
+        ] {
             assert!(super::essential_image(name), "{name}");
         }
         for name in [
@@ -961,6 +975,10 @@ mod tests {
         assert_eq!(
             json(ActionError::ServiceOutdated),
             r#"{"kind":"serviceOutdated"}"#
+        );
+        assert_eq!(
+            json(ActionError::AccessDeniedPrivileged),
+            r#"{"kind":"accessDeniedPrivileged"}"#
         );
         assert_eq!(
             json(ActionError::StillSuspended),

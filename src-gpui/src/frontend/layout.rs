@@ -260,6 +260,13 @@ impl Desktop {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.act(Action::Page(page.into()), window, cx);
                 }))
+                .when(page == "history", |tab| {
+                    tab.on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                        if *hovered {
+                            this.history_prefetch(window, cx);
+                        }
+                    }))
+                })
                 .when(top, |tab| {
                     // Reserve the selected weight so choosing a tab never moves its neighbors.
                     tab.h(px(32.)).child(
@@ -553,35 +560,26 @@ impl Desktop {
                         .absolute()
                         .top_0()
                         .right_0()
-                        .w(dialogs::captions_width())
+                        .w(caption::width())
                         .h(height),
                 ),
             )
             .child(
-                TitleBar::new()
-                    .h(height)
-                    .flex_shrink_0()
-                    // The row below has the interface's own 12 px inset.
-                    .pl_0()
-                    // The row paints the background, under the dim behind
-                    // the caption buttons.
-                    .bg(gpui_kit::gpui::transparent_black())
-                    .border_0()
-                    .child(
-                        div()
-                            // Exactly the room before the caption buttons.
-                            .h_full()
-                            .w_0()
-                            .flex_grow(1.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .flex()
-                            .items_center()
-                            .pl(px(12.))
-                            .pr(px(4.))
-                            .child(start)
-                            .on_prepaint(track_title(2, self.toolbar_regions.clone(), owner)),
-                    ),
+                self.title_row(
+                    div()
+                        // Exactly the room before the caption buttons.
+                        .size_full()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .pl(px(12.))
+                        .pr(px(4.))
+                        .child(start)
+                        .on_prepaint(track_title(2, self.toolbar_regions.clone(), owner)),
+                    height,
+                    window,
+                    cx,
+                ),
             );
         if self.has_search() {
             let regions = *self.toolbar_regions.borrow();
@@ -832,7 +830,22 @@ impl Desktop {
                     .child(self.details_button(cx))
             }
             "services" => row.child(self.service_actions(cx)),
-            "network" => row.child(self.visibility_controls(cx)),
+            "network" => {
+                // Every connection on its own, or gathered under its program.
+                let views = [("apps", "AppsIcon"), ("list", "ListIcon")]
+                    .into_iter()
+                    .map(|(mode, glyph)| {
+                        (
+                            String::new(),
+                            Some(glyph),
+                            Action::ConnectionView(mode.into()),
+                            self.connection_view == mode,
+                        )
+                    })
+                    .collect();
+                row.child(self.segments("connection-view", views, cx))
+                    .child(self.visibility_controls(cx))
+            }
             _ => row.child(self.page_controls(compact, window, cx)),
         };
         Some(row.into_any_element())
@@ -922,6 +935,20 @@ impl Desktop {
             .icon("LockIcon")
             .detail(label("shell.more.fileLockDetail")),
         ];
+        if matches!(
+            self.page.as_str(),
+            "processes" | "services" | "startup" | "network"
+        ) {
+            items.push(
+                MenuItem::new(label("shell.more.exportCsv"), Action::ExportTableCsv)
+                    .icon("DownloadIcon")
+                    .disabled(self.exportable_table(cx).is_none()),
+            );
+        }
+        if self.page == "history" {
+            items.push(MenuItem::separator());
+            items.extend(self.history_more_items());
+        }
         if self.page == "services" {
             items.push(
                 MenuItem::new(
@@ -931,11 +958,17 @@ impl Desktop {
                 .icon("ExternalIcon"),
             );
         }
+        // On the history page the chart's keys and gestures come open.
+        let open = if self.page == "history" {
+            json!({ "open": { "history": true, "historyMouse": true } })
+        } else {
+            json!({})
+        };
         items.push(MenuItem::separator());
         items.push(
             MenuItem::new(
                 label("settings.shortcuts.title"),
-                Action::Dialog("shortcuts".into(), json!({})),
+                Action::Dialog("shortcuts".into(), open),
             )
             .icon("KeyboardIcon"),
         );
@@ -1163,6 +1196,9 @@ impl Desktop {
             let name = selected
                 .map(|s| text(s, "name").to_owned())
                 .unwrap_or_default();
+            let display = selected
+                .map(|s| text(s, "displayName").to_owned())
+                .unwrap_or_default();
             let tip = label(title);
             row = row.child(
                 self.tool_button(
@@ -1171,7 +1207,7 @@ impl Desktop {
                     Some(glyph),
                     Action::Invoke(
                         "control_service".into(),
-                        json!({"name": name, "action": action}),
+                        json!({"name": name, "action": action, "display": display}),
                     ),
                     false,
                     cx,
@@ -1231,9 +1267,7 @@ impl Desktop {
         }
         let privilege = if boolean(&self.data["info"], "elevated") {
             "admin"
-        } else if self.data.get("privilege").is_some_and(|s| {
-            text(s, "state") == "running" && boolean(s, "authorized") && s["error"].is_null()
-        }) {
+        } else if self.privileged() {
             "service"
         } else {
             "standard"

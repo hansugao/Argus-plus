@@ -19,9 +19,8 @@ const MARGIN: f32 = 8.;
 const SHUT_CLICK: Duration = Duration::from_secs(1);
 /// Hover time before a submenu opens or another item closes it (Windows uses about 400 ms).
 const SUBMENU_DELAY: Duration = Duration::from_millis(250);
-/// `flyout-in`, and how long a closed surface takes to roll up.
+/// `flyout-in`. A menu or submenu that closes goes at once.
 const ENTER_SECONDS: f32 = 0.167;
-const LEAVE_SECONDS: f32 = 0.083;
 /// The scale `flyout-in` starts from. The menu position depends on its size
 /// at that moment, so one that opens up or left of the pointer overlaps it
 /// by the difference once grown; menus here are placed the same way.
@@ -55,8 +54,6 @@ struct Submenu {
 enum Part {
     Menu,
     Submenu,
-    /// The submenu that closed or gave way to another, rolling up.
-    Closed,
 }
 
 /// An open context menu.
@@ -72,9 +69,6 @@ pub(super) struct Popup {
     focus_visible: bool,
     hovered: Option<Entry>,
     sub: Option<Submenu>,
-    /// The submenu that closed or gave way to another, and when: it rolls
-    /// up as the menu itself does.
-    sub_leaving: Option<(Submenu, Instant)>,
     /// The pending hover change of the submenu.
     timer: Option<Task<()>>,
     /// The control the menu drops from (`Desktop::open_anchored`).
@@ -163,68 +157,20 @@ fn entered(since: Instant, reduce: bool) -> f32 {
     }
 }
 
-/// How much is left of a surface that closed at `since`, rolling up at an
-/// even pace: nothing once that is through, or at once under reduced motion.
-fn remaining(since: Instant, reduce: bool) -> Option<f32> {
-    let left = 1. - since.elapsed().as_secs_f32() / LEAVE_SECONDS;
-    (!reduce && left > 0.).then_some(left)
-}
-
-/// A closed surface on its way out: what `left` of its height shows, from the
-/// edge it opened at (its bottom if `upward`), drawn where it was. `surface`
-/// draws it at an origin.
-///
-/// It rolls up rather than fades out. Over the window's backdrop a fading
-/// surface is translucent all over, and some displays show such pixels
-/// brighter than either the surface or the page: the menu flashed as it
-/// closed. A clip leaves every pixel either the surface's or the page's
-/// (`docs/design/window.md`).
-fn rolled(
-    origin: Point<Pixels>,
-    size: Size<Pixels>,
-    left: f32,
-    upward: bool,
-    surface: impl FnOnce(Point<Pixels>) -> Stateful<Div>,
-) -> AnyElement {
-    if left >= 1. {
-        return surface(origin).into_any_element();
-    }
-    let height = size.height * left.max(0.);
-    let top = if upward {
-        origin.y + size.height - height
-    } else {
-        origin.y
-    };
-    div()
-        .absolute()
-        .left(origin.x)
-        .top(top)
-        .w(size.width)
-        .h(height)
-        .overflow_hidden()
-        .child(surface(point(px(0.), origin.y - top)))
-        .into_any_element()
-}
-
-/// Whether a menu is open, and when the last one closed.
+/// Whether a menu is open.
 #[derive(Default)]
 struct Presence {
     open: bool,
-    closed: Option<Instant>,
 }
 
 impl Global for Presence {}
 
-/// Whether a menu is open or still rolling up. No hover hint shows meanwhile
+/// Whether a menu is open. No hover hint shows meanwhile
 /// (`widgets::tooltip`): a hint's delay and the element it belongs to know
 /// nothing of a menu opened over them, and the hint would show on top of it.
 pub(super) fn in_the_way(cx: &App) -> bool {
-    cx.try_global::<Presence>().is_some_and(|presence| {
-        presence.open
-            || presence
-                .closed
-                .is_some_and(|at| remaining(at, cx.reduce_motion()).is_some())
-    })
+    cx.try_global::<Presence>()
+        .is_some_and(|presence| presence.open)
 }
 
 /// Whether a menu of `rows` items fits a window `height` tall. A menu does
@@ -371,14 +317,10 @@ impl Desktop {
             focus_visible: false,
             hovered: None,
             sub: None,
-            sub_leaving: None,
             timer: None,
             anchor: None,
         });
-        cx.set_global(Presence {
-            open: true,
-            closed: None,
-        });
+        cx.set_global(Presence { open: true });
         window.refresh();
         cx.notify();
     }
@@ -398,7 +340,7 @@ impl Desktop {
             .is_some_and(|(shut, at)| shut == anchor && at.elapsed() < SHUT_CLICK)
     }
 
-    /// Drops the menu at once, as its page goes.
+    /// Drops the menu as its page goes.
     pub(in crate::frontend) fn drop_menu(&mut self, cx: &mut Context<Self>) {
         if self.popup.take().is_some() {
             cx.set_global(Presence::default());
@@ -448,22 +390,16 @@ impl Desktop {
         })
     }
 
-    /// Closes the menu, which rolls up. The keyboard goes back to the window
-    /// unless an item gave it to something else.
+    /// Closes the menu, which goes at once. The keyboard goes back to the
+    /// window unless an item gave it to something else.
     pub(in crate::frontend) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut popup) = self.popup.take() else {
+        let Some(popup) = self.popup.take() else {
             return;
         };
-        popup.timer = None;
         if popup.focus_handle.contains_focused(window, cx) {
             self.focus.focus(window, cx);
         }
-        let now = Instant::now();
-        self.popup_leaving = Some((popup, now));
-        cx.set_global(Presence {
-            open: false,
-            closed: Some(now),
-        });
+        cx.set_global(Presence::default());
         // The rows re-sort once the input that closed the menu is through: a
         // press on another row must still find the rows it was aimed at.
         cx.spawn_in(window, async move |this, cx| {
@@ -509,12 +445,11 @@ impl Desktop {
             return;
         };
         if popup.sub.as_ref().is_none_or(|sub| sub.owner != owner) {
-            let now = Instant::now();
-            let opened = Submenu { owner, opened: now };
             // Another item's submenu gives way to this one.
-            if let Some(closed) = popup.sub.replace(opened) {
-                popup.sub_leaving = Some((closed, now));
-            }
+            popup.sub = Some(Submenu {
+                owner,
+                opened: Instant::now(),
+            });
         }
         let first = enabled(popup.children()).next();
         if focus && let Some(first) = first {
@@ -527,11 +462,7 @@ impl Desktop {
         let Some(popup) = &mut self.popup else {
             return;
         };
-        let closed = popup.sub.take();
-        let owner = closed.as_ref().map(|sub| sub.owner);
-        if let Some(closed) = closed {
-            popup.sub_leaving = Some((closed, Instant::now()));
-        }
+        let owner = popup.sub.take().map(|sub| sub.owner);
         popup.hovered = popup.hovered.filter(|entry| matches!(entry, Entry::Top(_)));
         match (refocus, owner) {
             (true, Some(owner)) => popup.focus = MenuFocus::Top(owner),
@@ -706,64 +637,40 @@ impl Desktop {
         cx.notify();
     }
 
-    /// The open menu and its submenu over everything, and under them the menu
-    /// that closed while it rolls up.
+    /// The open menu and its submenu over everything.
     pub(in crate::frontend) fn menu_overlay(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let reduce = cx.reduce_motion();
-        let closed = self
-            .popup_leaving
-            .as_ref()
-            .and_then(|(popup, at)| Some((popup, remaining(*at, reduce)?)));
-        if self.popup.is_none() && closed.is_none() {
-            return None;
-        }
+        let popup = self.popup.as_ref()?;
         let viewport = window.viewport_size();
         let mut animating = false;
-        let mut layer = div()
-            .id("menu-layer")
-            .w(viewport.width)
-            .h(viewport.height)
-            .on_scroll(|_, _, cx| cx.stop_propagation());
-        if let Some((popup, left)) = closed {
-            animating = true;
-            // Its surfaces are named as those of a menu opened meanwhile: kept
-            // apart from them, and under them.
-            layer = layer.child(
-                div()
-                    .id("menu-leaving")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .children(self.menu_surfaces(popup, Some(left), &mut animating, window, cx)),
-            );
-        }
-        if let Some(popup) = &self.popup {
-            layer = layer
-                // A press anywhere else closes the menu and still reaches what is there.
-                .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // On the menu's own control, the press only closes it.
-                    let anchor = this.popup.as_ref().and_then(|popup| popup.anchor.clone());
-                    this.menu_shut = anchor
-                        .filter(|anchor| {
-                            this.ui
-                                .anchors
-                                .borrow()
-                                .get(anchor.as_str())
-                                .is_some_and(|bounds| bounds.contains(&event.position))
-                        })
-                        .map(|anchor| (anchor, Instant::now()));
-                    this.close_menu(window, cx);
-                }))
-                .children(self.menu_surfaces(popup, None, &mut animating, window, cx));
-        }
+        let surfaces = self.menu_surfaces(popup, &mut animating, window, cx);
         if animating {
             window.request_animation_frame();
         }
+        let layer = div()
+            .id("menu-layer")
+            .w(viewport.width)
+            .h(viewport.height)
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            // A press anywhere else closes the menu and still reaches what is there.
+            .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                // On the menu's own control, the press only closes it.
+                let anchor = this.popup.as_ref().and_then(|popup| popup.anchor.clone());
+                this.menu_shut = anchor
+                    .filter(|anchor| {
+                        this.ui
+                            .anchors
+                            .borrow()
+                            .get(anchor.as_str())
+                            .is_some_and(|bounds| bounds.contains(&event.position))
+                    })
+                    .map(|anchor| (anchor, Instant::now()));
+                this.close_menu(window, cx);
+            }))
+            .children(surfaces);
         Some(
             deferred(anchored().position(point(px(0.), px(0.))).child(layer))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY)
@@ -771,21 +678,16 @@ impl Desktop {
         )
     }
 
-    /// A menu's surfaces, lowest first: the menu, the submenu that closed
-    /// while it rolls up, and the open submenu. `closing` is how much is left
-    /// of a closed menu: all of them roll up with it, without taking input.
-    /// `animating` is set while any of them is on its way in or out.
+    /// A menu's surfaces, lowest first: the menu and its open submenu.
+    /// `animating` is set while either is on its way in.
     fn menu_surfaces(
         &self,
         popup: &Popup,
-        closing: Option<f32>,
         animating: &mut bool,
         window: &Window,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let reduce = cx.reduce_motion();
-        let interactive = closing.is_none();
-        let whole = closing.unwrap_or(1.);
         let viewport = window.viewport_size();
         let placed = |size: Size<Pixels>| {
             if reduce {
@@ -796,12 +698,9 @@ impl Desktop {
         };
         let layout = measure(&popup.items, window, cx);
         let origin = menu_origin(popup.position, placed(layout.size), viewport);
-        // One closed while it was still fading in goes on fading in.
         let opacity = entered(popup.opened, reduce);
         *animating |= opacity < 1.;
-        // A menu that opened above the pointer goes back down to it.
-        let upward = origin.y < popup.position.y;
-        let mut surfaces = vec![rolled(origin, layout.size, whole, upward, |origin| {
+        let mut surfaces = vec![
             self.menu_surface(
                 popup,
                 &popup.items,
@@ -809,19 +708,15 @@ impl Desktop {
                 origin,
                 &layout,
                 opacity,
-                interactive,
                 cx,
             )
-        })];
-        let closed = popup
-            .sub_leaving
+            .into_any_element(),
+        ];
+        if let Some((sub, owner)) = popup
+            .sub
             .as_ref()
-            .and_then(|(sub, at)| Some((sub, Part::Closed, remaining(*at, reduce)?)));
-        let open = popup.sub.as_ref().map(|sub| (sub, Part::Submenu, 1.));
-        for (sub, part, left) in closed.into_iter().chain(open) {
-            let Some(owner) = popup.items.get(sub.owner) else {
-                continue;
-            };
+            .and_then(|sub| Some((sub, popup.items.get(sub.owner)?)))
+        {
             let sub_layout = measure(&owner.children, window, cx);
             let sub_origin = submenu_origin(
                 origin,
@@ -831,26 +726,19 @@ impl Desktop {
                 viewport,
             );
             let sub_opacity = entered(sub.opened, reduce);
-            *animating |= part == Part::Closed || sub_opacity < 1.;
-            // A submenu goes back to its first item, level with its owner.
-            surfaces.push(rolled(
-                sub_origin,
-                sub_layout.size,
-                left * whole,
-                false,
-                |origin| {
-                    self.menu_surface(
-                        popup,
-                        &owner.children,
-                        part,
-                        origin,
-                        &sub_layout,
-                        sub_opacity,
-                        interactive && part == Part::Submenu,
-                        cx,
-                    )
-                },
-            ));
+            *animating |= sub_opacity < 1.;
+            surfaces.push(
+                self.menu_surface(
+                    popup,
+                    &owner.children,
+                    Part::Submenu,
+                    sub_origin,
+                    &sub_layout,
+                    sub_opacity,
+                    cx,
+                )
+                .into_any_element(),
+            );
         }
         surfaces
     }
@@ -865,7 +753,6 @@ impl Desktop {
         origin: Point<Pixels>,
         layout: &MenuLayout,
         opacity: f32,
-        interactive: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let p = self.palette;
@@ -896,8 +783,7 @@ impl Desktop {
             let owner = !sub && !item.children.is_empty();
             // `:hover`, `:focus-visible` and the item whose submenu is open;
             // never a disabled item, which keys pass over too.
-            let lit = interactive
-                && !item.disabled
+            let lit = !item.disabled
                 && (popup.hovered == Some(this_entry)
                     || (popup.focus_visible && focused(index))
                     || (owner && open_owner == Some(index)));
@@ -964,13 +850,11 @@ impl Desktop {
                             .child(icon("ChevronRight", p.faint).size(px(CHEVRON))),
                     )
                 })
-                .when(interactive, |d| {
-                    d.hover_listener_mode(HoverListenerMode::InputModalityIndependent)
-                        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                            this.menu_hover(this_entry, *hovered, window, cx);
-                        }))
-                })
-                .when(interactive && !item.disabled, |d| {
+                .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                    this.menu_hover(this_entry, *hovered, window, cx);
+                }))
+                .when(!item.disabled, |d| {
                     d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         if let Some(popup) = &mut this.popup {
                             popup.focus_visible = false;
@@ -983,7 +867,6 @@ impl Desktop {
             .id(match part {
                 Part::Menu => "menu",
                 Part::Submenu => "submenu",
-                Part::Closed => "submenu-closed",
             })
             .role(Role::Menu)
             .absolute()
@@ -1003,12 +886,10 @@ impl Desktop {
             .line_height(relative(1.4))
             .whitespace_nowrap()
             .when(!sub, |d| d.track_focus(&popup.focus_handle))
-            .when(interactive, |d| {
-                d.occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            })
-            .when(interactive && sub, |d| {
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .when(sub, |d| {
                 // Reaching the submenu keeps it open.
                 d.on_hover(cx.listener(|this, hovered: &bool, _, _| {
                     if *hovered && let Some(popup) = &mut this.popup {
@@ -1070,6 +951,8 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Taken whether or not a menu opens, so that it is never stale.
+        let column = self.take_context_column(cx);
         let Some(row) = self.rows.get(index).cloned() else {
             return;
         };
@@ -1079,11 +962,68 @@ impl Desktop {
             table.update(cx, |state, cx| state.set_right_clicked_row(None, cx));
         }
         if row.section.is_none() {
-            self.selected.insert(self.page.clone(), row.key.clone());
+            self.deselect_due = None;
+            let before = self.selected.insert(self.page.clone(), row.key.clone());
+            // The details pane shows the row now: read what it lists, as a
+            // left press does.
+            if self.page == "processes" && before.as_ref() != Some(&row.key) {
+                self.details_track(&row.key, window, cx);
+            }
         } else if row.user.is_none() {
             return;
         }
-        let items = self.row_menu(&row);
+        // The other lists copy the cells shown as their details, taken now:
+        // a connection can leave the list while its menu is open.
+        let details = self.cells_text(&row, cx);
+        // Their name column is what Ctrl+C copies; it gets its own item, as
+        // the process list's copy submenu has "Name".
+        let first = tables::first_column(&self.page);
+        let name_cell = details
+            .is_some()
+            .then(|| self.cell_copy(&row, first, cx))
+            .flatten();
+        let cell = column
+            .filter(|key| {
+                row.section.is_none()
+                    && list_copy::LISTS.contains(&self.page.as_str())
+                    && !(name_cell.is_some() && *key == first)
+            })
+            .and_then(|key| self.cell_copy(&row, key, cx));
+        let mut items = self.row_menu(&row);
+        let column_item = |(name, value): (String, String)| {
+            let nothing = value.is_empty() || value == label("format.missing");
+            MenuItem::new(
+                tr!("processes.menu.copyColumn", column = &name),
+                Action::CopyAs(value, tr!("processes.menu.columnWhat", column = &name)),
+            )
+            .disabled(nothing)
+        };
+        // The other lists gather their copies in one submenu, the clicked
+        // column's too, so the menu keeps its height whatever it holds (a
+        // note adds a row): the page's own copies, the name (Ctrl+C), the
+        // column, then the details (Ctrl+Shift+C).
+        if let Some(details) = details {
+            let mut more = Vec::new();
+            if let Some((name, value)) = name_cell {
+                more.push(
+                    MenuItem::new(name, Action::CopyAs(value, label("actions.copyWhat.name")))
+                        .hint("Ctrl+C"),
+                );
+            }
+            more.extend(cell.map(column_item));
+            more.push(MenuItem::separator());
+            more.push(
+                MenuItem::new(
+                    label("processes.menu.details"),
+                    Action::CopyAs(details, label("actions.copyWhat.details")),
+                )
+                .hint("Ctrl+Shift+C"),
+            );
+            items = list_copy::gather_copies(items, more, label("common.edit.copy"));
+        } else if let Some(cell) = cell {
+            // The process list's cell copy follows its copy submenu.
+            items.insert(list_copy::copy_position(&items), column_item(cell));
+        }
         self.open_popup(items, window, cx);
         cx.notify();
     }
@@ -1154,7 +1094,7 @@ impl Desktop {
                     .icon("FolderIcon")
                     .disabled(!boolean(raw, "exists") || path.is_none()),
                     MenuItem::new(
-                        label("startup.menu.copyCommand"),
+                        label("common.command"),
                         Action::Copy(text(raw, "command").into(), "startup.copied.command"),
                     )
                     .icon("CopyIcon")
@@ -1167,7 +1107,8 @@ impl Desktop {
             "network" => self.connection_menu(row),
             _ => vec![],
         };
-        if self.page != "processes" {
+        // A program's heading has no mark of its own: its connections do.
+        if self.page != "processes" && !(self.page == "network" && row.expandable) {
             items.extend(self.mark_menu(row));
         }
         items
@@ -1339,6 +1280,28 @@ impl Desktop {
             label("processes.menu.addRule"),
             Action::Dialog("ruleScope".into(), json!({"name":text(&row.raw,"name")})),
         ));
+        let watch_target = row
+            .members
+            .iter()
+            .find(|member| number(member, "createTime") > 0.);
+        items.push(
+            MenuItem::new(
+                label("history.watch.start"),
+                Action::Preference(
+                    "watchProcess".into(),
+                    watch_target.map_or(Value::Null, |target| {
+                        json!({
+                            "op": "start",
+                            "pid": target["pid"],
+                            "createTime": target["createTime"],
+                            "name": target["name"],
+                        })
+                    }),
+                ),
+            )
+            .icon("EyeIcon")
+            .disabled(watch_target.is_none()),
+        );
         items.push(MenuItem::separator());
         if row.expandable && self.view != "tree" {
             items.push(MenuItem::new(
@@ -1359,25 +1322,63 @@ impl Desktop {
             .icon("FolderIcon")
             .disabled(path.is_none()),
         );
-        items.push(
+        // What a process's row can copy; the details come together as
+        // the pane lists them.
+        let mut copies = vec![
             MenuItem::new(
-                label("common.copyPath"),
+                label("processes.column.name.label"),
+                Action::Copy(row.title.clone(), "actions.copyWhat.name"),
+            )
+            .hint("Ctrl+C"),
+            MenuItem::new(
+                label("processes.column.imageName.label"),
+                Action::Copy(text(&row.raw, "name").into(), "actions.copyWhat.imageName"),
+            ),
+        ];
+        if !group {
+            copies.push(MenuItem::new(
+                label("processes.column.pid.label"),
+                Action::Copy(row.raw["pid"].to_string(), "processes.menu.copyPidWhat"),
+            ));
+        }
+        copies.push(
+            MenuItem::new(
+                label("processes.column.path.label"),
                 Action::Copy(path.unwrap_or_default().into(), "actions.copyWhat.path"),
             )
-            .icon("CopyIcon")
             .disabled(path.is_none()),
         );
-        items.push(if group {
+        if !group {
+            let command = self
+                .data
+                .get(&format!("details:{}", row.key))
+                .and_then(|info| info["commandLine"].as_str())
+                .or_else(|| row.raw["commandLine"].as_str())
+                .filter(|command| !command.is_empty());
+            copies.push(
+                MenuItem::new(
+                    label("processes.column.commandLine.label"),
+                    Action::Copy(
+                        command.unwrap_or_default().into(),
+                        "actions.copyWhat.commandLine",
+                    ),
+                )
+                .disabled(command.is_none()),
+            );
+        }
+        copies.push(MenuItem::separator());
+        copies.push(
             MenuItem::new(
-                label("common.copyName"),
-                Action::Copy(text(&row.raw, "name").into(), "actions.copyWhat.name"),
+                label("processes.menu.details"),
+                Action::CopyDetails(row.key.clone()),
             )
-        } else {
-            MenuItem::new(
-                label("processes.menu.copyPid"),
-                Action::Copy(row.raw["pid"].to_string(), "processes.menu.copyPidWhat"),
-            )
-        });
+            .hint("Ctrl+Shift+C"),
+        );
+        items.push(
+            MenuItem::new(label("common.edit.copy"), Action::CloseOverlay)
+                .icon("CopyIcon")
+                .submenu(copies),
+        );
         items.push(MenuItem::separator());
         items.push(
             MenuItem::new(
@@ -1397,7 +1398,7 @@ impl Desktop {
         let control = |action: &str| {
             Action::Invoke(
                 "control_service".into(),
-                json!({"name":name,"action":action}),
+                json!({"name":name,"action":action,"display":text(raw, "displayName")}),
             )
         };
         // The binary is the first token of the image path, quoted or not.
@@ -1407,7 +1408,12 @@ impl Desktop {
             .and_then(|rest| rest.split('"').next())
             .or_else(|| command.split_whitespace().next())
             .filter(|binary| !binary.is_empty());
-        let current = text(raw, "startType");
+        // A start type written for the next boot is the one the user chose.
+        let current = match text(raw, "pendingStartType") {
+            "" => text(raw, "startType"),
+            pending => pending,
+        };
+        let registry_allowed = boolean(raw, "registryStartTypeAllowed");
         let mut items = vec![
             MenuItem::new(label("common.start"), control("start"))
                 .icon("PlayIcon")
@@ -1434,7 +1440,12 @@ impl Desktop {
                     ),
                     Action::Invoke(
                         "set_service_start_type".into(),
-                        json!({"name":name,"startType":start_type}),
+                        json!({
+                            "name":name,
+                            "startType":start_type,
+                            "registryStartTypeAllowed":registry_allowed,
+                            "display":text(raw, "displayName"),
+                        }),
                     ),
                 )
                 .checked(current == start_type),
@@ -1456,7 +1467,7 @@ impl Desktop {
             .icon("FolderIcon")
             .disabled(binary.is_none()),
             MenuItem::new(
-                label("services.menu.copyName"),
+                label("common.name"),
                 Action::Copy(name.into(), "services.copied.name"),
             )
             .icon("CopyIcon"),
@@ -1498,23 +1509,43 @@ impl Desktop {
         };
         let closable = text(raw, "protocol") == "tcp" && !v6 && text(raw, "state") == "established";
         let remote = raw["remoteAddress"].as_str();
+        let reveal = MenuItem::new(
+            label("common.goToProcess"),
+            Action::Preference("revealProcess".into(), raw.clone()),
+        )
+        .icon("GoToIcon")
+        .disabled(process.is_none());
+        let end = MenuItem::new(
+            tr!("connections.menu.end", name = name),
+            Action::Dialog(
+                "end".into(),
+                json!({"members":process.into_iter().collect::<Vec<_>>(),"name":name}),
+            ),
+        )
+        .icon("EndIcon")
+        .danger()
+        .disabled(pid <= 4 || process.is_none());
+        // A program's heading: its PID is there when one process owns them all.
+        if row.expandable {
+            return vec![
+                MenuItem::new(
+                    label(if row.expanded {
+                        "common.collapse"
+                    } else {
+                        "common.expand"
+                    }),
+                    Action::Fold(row.key.clone()),
+                )
+                // Every match shows while searching: headings cannot fold.
+                .disabled(!self.query.trim().is_empty()),
+                MenuItem::separator(),
+                reveal,
+                end,
+            ];
+        }
         vec![
-            MenuItem::new(
-                label("common.goToProcess"),
-                Action::Preference("revealProcess".into(), raw.clone()),
-            )
-            .icon("GoToIcon")
-            .disabled(process.is_none()),
-            MenuItem::new(
-                tr!("connections.menu.end", name = name),
-                Action::Dialog(
-                    "end".into(),
-                    json!({"members":process.into_iter().collect::<Vec<_>>(),"name":name}),
-                ),
-            )
-            .icon("EndIcon")
-            .danger()
-            .disabled(pid <= 4 || process.is_none()),
+            reveal,
+            end,
             MenuItem::new(
                 label("connections.menu.close"),
                 Action::Invoke("close_connection".into(), raw.clone()),
@@ -1523,7 +1554,7 @@ impl Desktop {
             .disabled(!closable),
             MenuItem::separator(),
             MenuItem::new(
-                label("connections.menu.copyLocal"),
+                label("connections.column.localAddress"),
                 Action::Copy(
                     endpoint(text(raw, "localAddress"), &raw["localPort"]),
                     "connections.copied.local",
@@ -1531,7 +1562,7 @@ impl Desktop {
             )
             .icon("CopyIcon"),
             MenuItem::new(
-                label("connections.menu.copyRemote"),
+                label("connections.column.remoteAddress"),
                 Action::Copy(
                     remote
                         .map(|r| endpoint(r, &raw["remotePort"]))

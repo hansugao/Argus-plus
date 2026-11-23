@@ -2,12 +2,19 @@
 //! theme, hotkey, close behavior, autostart, process rules, history recording,
 //! updates and what a new version shows first, onboarding), persisted as JSON
 //! in the app config dir.
+//!
+//! A save writes only what differs from the defaults (`saved`): a setting
+//! never changed follows the default of whichever version reads it, so a
+//! changed default needs no migration. Files earlier versions wrote in full
+//! shrink to that with their next save, and every version saves on its first
+//! start (`seen_version`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use argus_core::history::{HistoryDetail, HistoryLimit, HistoryOptions, RecordGroups, Recording};
 use argus_core::i18n::Locale;
 use argus_core::rules::ProcessRule;
 use serde::{Deserialize, Serialize};
@@ -666,6 +673,9 @@ pub enum UpdateRoute {
     Proxy,
 }
 
+/// Groups of settings in it (the monitors, what history records) are saved
+/// without their defaults too: their structs read a missing field as its
+/// default (`#[serde(default)]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -706,6 +716,14 @@ pub struct Settings {
     pub rules: Vec<ProcessRule>,
     /// Record history for the history page.
     pub history: bool,
+    pub history_keep_days: Option<u32>,
+    pub history_keep_bytes: Option<u64>,
+    #[serde(deserialize_with = "lenient_monitor")]
+    pub history_detail: HistoryDetail,
+    pub history_dir: Option<PathBuf>,
+    #[serde(deserialize_with = "lenient_monitor")]
+    pub history_record: RecordGroups,
+    pub history_processes: u32,
     /// Opt-in CPU sensors; an explicit enable action prepares PawnIO if needed.
     pub kernel_sensors: bool,
     /// Check for updates in the background.
@@ -741,6 +759,12 @@ impl Default for Settings {
             hotkey_enabled: true,
             rules: Vec::new(),
             history: true,
+            history_keep_days: HistoryLimit::default().days,
+            history_keep_bytes: HistoryLimit::default().bytes,
+            history_detail: HistoryDetail::default(),
+            history_dir: None,
+            history_record: RecordGroups::default(),
+            history_processes: Recording::default().processes,
             kernel_sensors: false,
             update_check: true,
             update_channel: UpdateChannel::default(),
@@ -752,10 +776,119 @@ impl Default for Settings {
     }
 }
 
+/// A missing limit is unchanged. An explicit JSON null clears that limit.
+fn nullable_limit<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryOptionsPatch {
+    #[serde(deserialize_with = "nullable_limit")]
+    keep_days: Option<Option<u32>>,
+    #[serde(deserialize_with = "nullable_limit")]
+    keep_bytes: Option<Option<u64>>,
+    detail: Option<HistoryDetail>,
+    record: Option<RecordPatch>,
+    processes: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct RecordPatch {
+    cpu_extra: Option<bool>,
+    sensors: Option<bool>,
+    memory_detail: Option<bool>,
+    counts: Option<bool>,
+    disks: Option<bool>,
+    nics: Option<bool>,
+    gpus: Option<bool>,
+    battery_detail: Option<bool>,
+    process_disk: Option<bool>,
+    process_network: Option<bool>,
+    process_gpu: Option<bool>,
+}
+impl HistoryOptionsPatch {
+    pub fn valid(&self) -> bool {
+        self.processes.is_none_or(|p| matches!(p, 0 | 20 | 40))
+    }
+    pub fn apply(self, s: &mut Settings) {
+        if let Some(n) = self.keep_days {
+            s.history_keep_days = n;
+        }
+        if let Some(n) = self.keep_bytes {
+            s.history_keep_bytes = n;
+        }
+        if let Some(detail) = self.detail {
+            s.history_detail = detail;
+        }
+        if let Some(n) = self.processes {
+            s.history_processes = n;
+        }
+        if let Some(p) = self.record {
+            if let Some(on) = p.cpu_extra {
+                s.history_record.cpu_extra = on;
+            }
+            if let Some(on) = p.sensors {
+                s.history_record.sensors = on;
+            }
+            if let Some(on) = p.memory_detail {
+                s.history_record.memory_detail = on;
+            }
+            if let Some(on) = p.counts {
+                s.history_record.counts = on;
+            }
+            if let Some(on) = p.disks {
+                s.history_record.disks = on;
+            }
+            if let Some(on) = p.nics {
+                s.history_record.nics = on;
+            }
+            if let Some(on) = p.gpus {
+                s.history_record.gpus = on;
+            }
+            if let Some(on) = p.battery_detail {
+                s.history_record.battery_detail = on;
+            }
+            if let Some(on) = p.process_disk {
+                s.history_record.process_disk = on;
+            }
+            if let Some(on) = p.process_network {
+                s.history_record.process_network = on;
+            }
+            if let Some(on) = p.process_gpu {
+                s.history_record.process_gpu = on;
+            }
+        }
+    }
+}
+
 impl Settings {
+    pub fn history_options(&self) -> HistoryOptions {
+        HistoryOptions {
+            limit: HistoryLimit {
+                days: self.history_keep_days,
+                bytes: self.history_keep_bytes,
+            },
+            detail: self.history_detail,
+            recording: Recording {
+                groups: self.history_record,
+                processes: self.history_processes,
+            },
+        }
+    }
+
     /// Brings settings saved by an older version up to date, in memory; they
-    /// are written back with the next change.
+    /// are written back with the next change. It runs with every load, so it
+    /// only puts right what no version saves on purpose.
     fn migrate(&mut self) {
+        if !matches!(self.history_processes, 0 | 20 | 40) {
+            self.history_processes = 20;
+        }
+        if self.history_dir.as_ref().is_some_and(|p| !p.is_absolute()) {
+            self.history_dir = None;
+        }
         // The hotkey used to be turned off by clearing it.
         if self.hotkey.is_empty() {
             self.hotkey = DEFAULT_HOTKEY.into();
@@ -828,10 +961,33 @@ impl SettingsStore {
         let mut s = self.current.lock().unwrap();
         let mut next = s.clone();
         f(&mut next);
-        write(&self.path, &serde_json::to_vec_pretty(&next)?)?;
+        write(&self.path, &saved(&next)?)?;
         *s = next;
         Ok(s.clone())
     }
+}
+
+/// The file's contents for `settings`: what differs from the defaults,
+/// within groups of settings as well.
+fn saved(settings: &Settings) -> serde_json::Result<Vec<u8>> {
+    let mut value = serde_json::to_value(settings)?;
+    without_defaults(&mut value, &serde_json::to_value(Settings::default())?);
+    serde_json::to_vec_pretty(&value)
+}
+
+fn without_defaults(value: &mut serde_json::Value, default: &serde_json::Value) {
+    let (serde_json::Value::Object(fields), serde_json::Value::Object(defaults)) = (value, default)
+    else {
+        return;
+    };
+    fields.retain(|name, field| match defaults.get(name) {
+        Some(default) if field == default => false,
+        Some(default) => {
+            without_defaults(field, default);
+            true
+        }
+        None => true,
+    });
 }
 
 /// The saved settings; None means defaults. Whatever stands in the way is
@@ -946,6 +1102,30 @@ fn write_with_stage(path: &Path, bytes: &[u8], stage: &mut &'static str) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_monitor_settings_survive_saving_only_non_defaults() {
+        let mut settings = Settings::default();
+        let defaults: serde_json::Value =
+            serde_json::from_slice(&saved(&settings).unwrap()).unwrap();
+        assert!(defaults.get("taskbarMonitor").is_none());
+        settings.tray_icon = TrayIcon::Runner;
+        settings.taskbar_monitor.size = TaskbarSize::Large;
+        settings.taskbar_monitor.rows = 1;
+        settings.taskbar_monitor.colored = false;
+        settings.taskbar_monitor.opacity = 60;
+        let bytes = saved(&settings).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["trayIcon"], "runner");
+        assert_eq!(value["taskbarMonitor"]["size"], "large");
+        assert_eq!(value["taskbarMonitor"]["rows"], 1);
+        assert_eq!(value["taskbarMonitor"]["colored"], false);
+        assert_eq!(value["taskbarMonitor"]["opacity"], 60);
+        assert!(value["taskbarMonitor"].get("style").is_none());
+        let restored: Settings = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.tray_icon, settings.tray_icon);
+        assert_eq!(restored.taskbar_monitor, settings.taskbar_monitor);
+    }
 
     #[test]
     fn failed_save_does_not_enable_kernel_sensors_in_memory() {
@@ -1252,11 +1432,134 @@ mod tests {
         assert!(!read.hardware_acceleration);
     }
 
+    #[test]
+    fn history_settings_and_partial_edits_round_trip_through_old_files() {
+        let dir = scratch();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, br#"{"history":false,"closeToTray":false}"#).unwrap();
+        let store = SettingsStore::load(path.clone());
+        let old = store.get();
+        assert!(!old.history && !old.close_to_tray);
+        assert_eq!(old.history_keep_days, Some(30));
+        assert_eq!(old.history_keep_bytes, Some(2_u64 << 30));
+        assert_eq!(old.history_detail, HistoryDetail::Minute7);
+        assert_eq!(old.history_processes, 20);
+        assert_eq!(old.history_record, RecordGroups::default());
+        assert!(old.history_dir.is_none());
+        for json in [
+            r#"{"keepDays":null,"detail":"full","record":{"sensors":false},"processes":40}"#,
+            r#"{"keepBytes":null,"record":{"nics":false}}"#,
+        ] {
+            let patch: HistoryOptionsPatch = serde_json::from_str(json).unwrap();
+            assert!(patch.valid());
+            store
+                .update(|s| {
+                    patch.apply(s);
+                    s.history_dir = Some(dir.clone());
+                })
+                .unwrap();
+        }
+        let again = SettingsStore::load(path).get();
+        assert_eq!(again.history_detail, HistoryDetail::Full);
+        assert_eq!(again.history_dir, Some(dir.clone()));
+        assert_eq!(
+            (
+                again.history_keep_days,
+                again.history_keep_bytes,
+                again.history_processes
+            ),
+            (None, None, 40)
+        );
+        assert!(
+            !again.history_record.sensors
+                && !again.history_record.nics
+                && again.history_record.disks
+        );
+        assert!(
+            serde_json::from_str::<HistoryOptionsPatch>(r#"{"record":{"unknown":true}}"#).is_err()
+        );
+        assert!(
+            !serde_json::from_str::<HistoryOptionsPatch>(r#"{"processes":21}"#)
+                .unwrap()
+                .valid()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     fn scratch() -> PathBuf {
         let id = unsafe { windows::Win32::System::Com::CoCreateGuid() }.unwrap();
         let directory = std::env::temp_dir().join(format!("argus-settings-{id:?}"));
         std::fs::create_dir(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn saves_keep_only_what_differs_from_the_defaults() {
+        let dir = scratch();
+        let path = dir.join("settings.json");
+        // A file an earlier version wrote in full, defaults and all.
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "language": "system", "theme": "dark", "onboarding": 1,
+                "seenVersion": "0.5.0", "closeToTray": true, "minimizedInterval": 5000,
+                "trayInterval": 30000, "hotkey": "Ctrl+Alt+Escape", "hotkeyEnabled": true,
+                "rules": [], "history": true, "kernelSensors": false, "updateCheck": true,
+                "updateChannel": "stable", "updateRoute": "auto",
+                "updateProxy": crate::config::PROXY_PRESETS[0], "whatsNew": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = SettingsStore::load(path.clone());
+        store
+            .update(|s| {
+                s.seen_version = "0.6.0".into();
+                s.history_keep_days = None;
+                s.desktop_monitor.locked = true;
+                s.taskbar_monitor.style = TaskbarStyle::Figures;
+                s.history_record.sensors = false;
+            })
+            .unwrap();
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            file,
+            serde_json::json!({
+                "theme": "dark", "onboarding": 1, "seenVersion": "0.6.0", "trayInterval": 30000,
+                "historyKeepDays": null,
+                "desktopMonitor": {"locked": true},
+                "taskbarMonitor": {"style": "figures"},
+                "historyRecord": {"sensors": false},
+            })
+        );
+        // What was left out reads back as the defaults, inside groups too.
+        let again = SettingsStore::load(path).get();
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            serde_json::to_value(store.get()).unwrap()
+        );
+        assert_eq!(again.history_keep_days, None);
+        assert_eq!(again.history_keep_bytes, HistoryLimit::default().bytes);
+        assert!(again.desktop_monitor.locked && again.desktop_monitor.topmost);
+        assert_eq!(
+            again.taskbar_monitor.metrics,
+            TaskbarMonitor::default().metrics
+        );
+        assert!(!again.history_record.sensors && again.history_record.disks);
+        // Every group reads a missing field as its default.
+        assert_eq!(
+            serde_json::from_str::<DesktopMonitor>("{}").unwrap(),
+            DesktopMonitor::default()
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskbarMonitor>("{}").unwrap(),
+            TaskbarMonitor::default()
+        );
+        assert_eq!(
+            serde_json::from_str::<RecordGroups>("{}").unwrap(),
+            RecordGroups::default()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

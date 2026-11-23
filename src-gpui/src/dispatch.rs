@@ -301,6 +301,13 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
             argument::<Vec<String>>(&args, "keys")?,
         ))
         .expect("serializable command response")),
+        "history_events" => crate::commands::history_events(
+            host.state(),
+            argument::<i64>(&args, "from")?,
+            argument::<i64>(&args, "to")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
         "history_channels" => Ok(serde_json::to_value(crate::commands::history_channels(
             host.state(),
             argument::<i64>(&args, "from")?,
@@ -326,14 +333,23 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
             argument::<i64>(&args, "ts")?,
         ))
         .expect("serializable command response")),
-        "history_usage" => Ok(
-            serde_json::to_value(crate::commands::history_usage(host.state()))
-                .expect("serializable command response"),
-        ),
+        "history_usage" => Ok(serde_json::to_value(crate::commands::history_usage(
+            host.state(),
+            host.state(),
+        ))
+        .expect("serializable command response")),
         "watch_process" => crate::commands::watch_process(
             host.state(),
             host.state(),
             argument::<argus_core::watch::WatchAction>(&args, "action")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
+        "watch_points" => crate::commands::watch_points(
+            host.state(),
+            host.state(),
+            serde_json::from_value(args.clone())
+                .map_err(|_| serde_json::json!(argus_core::tr!("app.invalidRequest")))?,
         )
         .map(|value| serde_json::to_value(value).expect("serializable command response"))
         .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
@@ -345,6 +361,28 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
         )
         .map(|value| serde_json::to_value(value).expect("serializable command response"))
         .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
+        "set_history_options" => crate::commands::set_history_options(
+            host.clone(),
+            argument::<crate::settings::HistoryOptionsPatch>(&args, "options")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
+        "history_move" => crate::commands::history_move(
+            host.clone(),
+            argument::<String>(&args, "dir")?,
+            argument::<bool>(&args, "moveRecords")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
+        "history_reset_dir" => crate::commands::history_reset_dir(
+            host.clone(),
+            argument::<bool>(&args, "moveRecords")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
+        "history_open_dir" => crate::commands::history_open_dir(host.state())
+            .map(|value| serde_json::to_value(value).expect("serializable command response"))
+            .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
         "set_kernel_sensors" => crate::commands::set_kernel_sensors(
             host.clone(),
             host.state(),
@@ -352,7 +390,7 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
         )
         .map(|value| serde_json::to_value(value).expect("serializable command response"))
         .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
-        "clear_history" => crate::commands::clear_history(host.state(), host.state())
+        "clear_history" => crate::commands::clear_history(host.clone())
             .map(|value| serde_json::to_value(value).expect("serializable command response"))
             .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
         "quit" => {
@@ -435,6 +473,13 @@ pub fn invoke(host: &Host, name: &str, args: Value) -> Result<Value, Value> {
                 .map(|value| serde_json::to_value(value).expect("serializable command response"))
                 .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null))
         }
+        "set_service_start_type_registry" => crate::commands::set_service_start_type_registry(
+            host.state(),
+            argument::<String>(&args, "name")?,
+            argument::<StartType>(&args, "startType")?,
+        )
+        .map(|value| serde_json::to_value(value).expect("serializable command response"))
+        .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),
         "open_services_console" => crate::commands::open_services_console()
             .map(|value| serde_json::to_value(value).expect("serializable command response"))
             .map_err(|error| serde_json::to_value(error).unwrap_or(serde_json::Value::Null)),

@@ -41,6 +41,9 @@ while ((match = re.exec(source))) {
         type = s.slice(at + 1).trim();
       if (type.includes("Host")) return "host.clone()";
       if (type.startsWith("State<")) return "host.state()";
+      // Watch queries share the history page's flat argument object.
+      if (name === "watch_points" && type === "argus_core::watch::SeriesQuery")
+        return 'serde_json::from_value(args.clone()).map_err(|_|serde_json::json!(argus_core::tr!("app.invalidRequest")))?';
       return `argument::<${type}>(&args,${JSON.stringify(camel(key))})?`;
     });
   const call = `crate::commands::${name}(${args.join(",")})`;
