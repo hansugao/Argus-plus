@@ -2,6 +2,7 @@
 mod appearance;
 mod assets;
 mod backend;
+mod caption;
 mod charts;
 mod collation;
 mod columns;
@@ -13,6 +14,8 @@ mod hundred;
 mod icon_motion;
 mod inline;
 mod layout;
+mod leaks;
+mod list_copy;
 mod lists;
 mod menus;
 mod model;
@@ -59,6 +62,8 @@ use std::{
     time::{Duration, Instant},
 };
 use theme::{Palette, icon, label};
+/// The preference for SMART raw values in hexadecimal (default decimal).
+const DISK_RAW_HEX: &str = "diskRawHex";
 /// Minutes hidden before the window gives its memory back; 0 for never.
 const RELEASE_HIDDEN_MINUTES: [u64; 4] = [0, 1, 10, 30];
 const DEFAULT_RELEASE_HIDDEN_MINUTES: u64 = 10;
@@ -101,6 +106,8 @@ enum Action {
     Sort(String),
     Page(String),
     View(String),
+    /// How the connection list shows ("list" or "apps").
+    ConnectionView(String),
     Select(String),
     Fold(String),
     TreeExpand(String, bool),
@@ -117,6 +124,11 @@ enum Action {
     Preference(String, Value),
     /// Text to copy and the locale key naming it in the confirmation.
     Copy(String, &'static str),
+    /// Text to copy and its name in the confirmation.
+    CopyAs(String, String),
+    /// The details of the process row with this key, as text (`details_text`).
+    CopyDetails(String),
+    ExportTableCsv,
     /// A command of the history page.
     History(pages::history::Command),
     CloseOverlay,
@@ -274,6 +286,9 @@ struct Desktop {
     /// last laid out: the card's height in a viewport of any height.
     perf_card_chrome: Rc<Cell<Option<Pixels>>>,
     chart_tick_queued: bool,
+    /// Both history subpages use the same window callback and pixel-mode timer.
+    history_glide_queued: bool,
+    history_pixel_timer: Option<Task<()>>,
     /// Where the about page left room for the hundred dots (`hundred`).
     hundred_place: Rc<RefCell<hundred::Place>>,
     /// A fixture fed made-up samples (the `sample` test control): its chart
@@ -345,6 +360,10 @@ struct Desktop {
     sections: HashSet<String>,
     /// The folded user groups of the process list (`collapsedUsers`).
     user_folds: HashSet<String>,
+    /// How the connection list shows: "list", or "apps" gathered under
+    /// their programs, of which `connection_folds` are opened.
+    connection_view: String,
+    connection_folds: HashSet<String>,
     rows: Arc<Vec<Row>>,
     /// The process list as the automatic column widths measure it
     /// (`tables::WidthRows`).
@@ -389,6 +408,9 @@ struct Desktop {
     cpu_mode: String,
     cpu_page: String,
     disk_page: String,
+    history_page: String,
+    /// Whether SMART raw values read in hexadecimal rather than decimal.
+    disk_raw_hex: bool,
     /// The disk details page that is open, if one is.
     disk_details_open: Option<DiskDetailsOpen>,
     interval: u64,
@@ -399,8 +421,6 @@ struct Desktop {
     horizontal: f32,
     drag: Option<(String, Point<Pixels>, f32)>,
     popup: Option<menus::Popup>,
-    /// The menu that just closed, fading out (`menus::Popup`).
-    popup_leaving: Option<(menus::Popup, Instant)>,
     /// The control whose menu a press on it closed, and when (`menu_just_shut`).
     menu_shut: Option<(String, Instant)>,
     modal: Option<dialogs::Modal>,
@@ -411,6 +431,9 @@ struct Desktop {
     /// memory was given back since (`memory.releaseHidden`).
     hidden_since: Option<(Instant, bool)>,
     last_select: Option<(String, Instant)>,
+    /// A click on the selected process row that will deselect it unless a
+    /// second click makes it a double-click (`Desktop::deselect_later`).
+    deselect_due: Option<Task<()>>,
     /// The lists' column filters in force, by preference (`tables::ColumnFilter`).
     filters: HashMap<&'static str, String>,
     forms: HashMap<String, Entity<InputState>>,
@@ -421,6 +444,9 @@ struct Desktop {
     welcome_checked: bool,
     /// The history page (`pages::history`).
     history: pages::history::HistoryState,
+    /// The history subpage not shown (the system's or the observation's),
+    /// with its own window and lanes (`Desktop::set_history_page`).
+    history_parked: pages::history::HistoryState,
     /// The tray's open flyouts (`tray`).
     tray: tray::Flyouts,
     /// The desktop monitor's window (`monitors`).
@@ -478,6 +504,8 @@ impl Desktop {
             live_motions: Rc::default(),
             perf_card_chrome: Rc::new(Cell::new(None)),
             chart_tick_queued: false,
+            history_glide_queued: false,
+            history_pixel_timer: None,
             hundred_place: Rc::default(),
             fixture_samples: false,
             chart_frame: 0,
@@ -537,6 +565,11 @@ impl Desktop {
                 .get::<Vec<String>>(model::USER_FOLDS, vec![])
                 .into_iter()
                 .collect(),
+            connection_view: prefs.get("connectionView", "list".into()),
+            connection_folds: prefs
+                .get::<Vec<String>>("openedConnectionApps", vec![])
+                .into_iter()
+                .collect(),
             rows: Arc::new(vec![]),
             width_rows: None,
             width_pending: false,
@@ -575,6 +608,8 @@ impl Desktop {
             cpu_mode: prefs.get("cpuMode", "overall".into()),
             cpu_page: prefs.get("cpuPage", "overview".into()),
             disk_page: prefs.get("diskPage", "overview".into()),
+            history_page: "system".into(),
+            disk_raw_hex: prefs.get(DISK_RAW_HEX, false),
             disk_details_open: None,
             interval: prefs.get("interval", 1000),
             paused: false,
@@ -584,7 +619,6 @@ impl Desktop {
             horizontal: 0.,
             drag: None,
             popup: None,
-            popup_leaving: None,
             menu_shut: None,
             modal: None,
             ui: widgets::UiState::default(),
@@ -592,6 +626,7 @@ impl Desktop {
             last_privilege: Instant::now() - Duration::from_secs(60),
             hidden_since: None,
             last_select: None,
+            deselect_due: None,
             filters: tables::saved_filters(&prefs),
             forms: HashMap::new(),
             first_frame: false,
@@ -599,6 +634,7 @@ impl Desktop {
             prefetched: false,
             welcome_checked: false,
             history: Default::default(),
+            history_parked: pages::history::HistoryState::watch(),
             tray: tray::Flyouts::default(),
             monitors: monitors::Monitors::default(),
             ui_scale: appearance::SCALE.load(&prefs),
@@ -816,6 +852,7 @@ pub fn run(host: Host, options: Options) -> anyhow::Result<()> {
                         .join("preferences.json"),
                 );
                 prefs.initialize_window_motion();
+                prefs.migrate();
                 // Before the theme and the first layout: text sizes and the
                 // viewport depend on them.
                 appearance::apply_font_size(appearance::FONT_SIZE.load(&prefs));
@@ -831,11 +868,16 @@ pub fn run(host: Host, options: Options) -> anyhow::Result<()> {
                     cx,
                 );
                 scrollbar::style_library(crate::platform::is_dark(saved.theme), cx);
+                // Test instances stay at the bottom of the desktop (`keep_on_top`).
+                let on_top = prefs.get(caption::KEEP_ON_TOP, false) && !options.test;
                 let view =
                     cx.new(|cx| Desktop::new(host.clone(), options.clone(), prefs, window, cx));
                 // Apply platform integration after the component root is constructed.
                 window.defer(cx, move |window, cx| {
                     crate::platform::attach_window(&host, &options, window, cx);
+                    if on_top {
+                        crate::platform::keep_on_top(&host, true);
+                    }
                 });
                 let placements = view.read(cx).chart_placements.clone();
                 let clock = view.read(cx).chart_clock.clone();

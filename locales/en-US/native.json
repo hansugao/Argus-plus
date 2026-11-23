@@ -12,6 +12,7 @@
     "mappedFile": "The Argus program file is still memory-mapped. Exit the program using it, or save your work and restart the PC before retrying.",
     "diskFull": "There is not enough free disk space to write the program file. Free up space and retry.",
     "copyFailed": "The program file could not be updated. Check the files and installation directory using the error code and diagnostic log.",
+    "folderFailed": "The installation folder could not be prepared. Check the install location using the error code and diagnostic log.",
     "unsafeTarget": "The program file path points to a link or folder. The update was stopped. Check the installation location and retry.",
     "restartRequired": "Windows cannot release the program file at this time. Save your work and restart the PC before installing.",
     "checkFailed": "Windows could not complete the program file check. The failed step was recorded in the log.",
@@ -23,7 +24,15 @@
     "retryHint": "Release the file or resolve the cause above, then click Retry to continue. Click Cancel to exit setup.",
     "errorCode": "Error code: {code}",
     "logPath": "Diagnostic log: {path}",
-    "logFailed": "The log could not be written. Error code: {code}"
+    "logFailed": "The log could not be written. Error code: {code}",
+    "locationRisk": "Setup cannot make sure that only administrators can change the install location “{path}”:",
+    "locationDrive": "The drive does not keep file permissions or is not a fixed drive of this computer (for example, a USB drive, a network location or a FAT partition).",
+    "locationParent": "Other accounts can rename the parent folder “{path}” or change its permissions.",
+    "locationShared": "The folder already contains other files, and Setup does not change their permissions.",
+    "locationEffect": "Installing, updating and uninstalling Argus, and installing the privileged service, run programs from this location as an administrator. Other accounts could replace them there to gain administrator rights.",
+    "locationAdvice": "Installing to the default location, {default}, or to a new folder in the root of a drive, such as {example}, is recommended.",
+    "locationAdviceDefault": "Installing to the default location, {default}, is recommended.",
+    "locationContinue": "Install to this location anyway?"
   },
   "tray": {
     "show": "Show Argus",
@@ -72,7 +81,7 @@
       "ipv4Only": "Only IPv4 TCP connections can be closed"
     },
     "fileLock": {
-      "restartManagerFailed": "Restart Manager couldn't check the target; the results below come from a handle search"
+      "restartManagerFailed": "Couldn't finish checking the files; the results come only from a handle search"
     },
     "handles": {
       "tooMany": "Up to 32 paths can be checked at a time, with a total length of at most 8 KiB",
@@ -120,6 +129,7 @@
       "helperExited": "The handle search helper exited early; only completed results are shown",
       "serviceIncomplete": "The privileged service didn't complete this search, so local results are shown: {error}",
       "serviceIncompleteLocal": "The privileged service didn't complete this search; local search results are shown",
+      "bothIncomplete": "Neither the privileged service nor the local search completed: {error}",
       "unavailable": "Search is temporarily unavailable",
       "serviceOutdated": "The privileged service doesn't support handle searches, so update the service; local search results are shown",
       "serviceUnavailable": "The privileged service is unavailable, so local search results are shown: {error}"
@@ -230,7 +240,7 @@
     "driverInUse": "PawnIO cannot stop right now or is still in use by another application. The upgrade was stopped. Close other applications that use hardware sensors and retry; if it still fails, restart Windows and retry.",
     "unsafeDriverPath": "The PawnIO driver path failed its ownership, permissions or link check. Enabling was stopped. Ask an administrator to check the driver file and its parent directories.",
     "writableDriverStore": "The Windows driver store directory DriverStore\\FileRepository allows standard users to write. PawnIO was not enabled. Ask an administrator to restore this directory's permissions, then try again.",
-    "unsafeSetupPath": "The PawnIO installer staging directory failed its ownership, permissions or link check. The operation was stopped. Ask an administrator to check Program Files\\Argus Sensor Setup and its parent directory.",
+    "unsafeSetupPath": "The PawnIO installer staging directory failed its ownership, permissions or link check. The operation was stopped. Ask an administrator to check Program Files\\Argus Privileged\\setup and its parent directory.",
     "notReady": "PawnIO is not running correctly. Kernel sensors remain off. Check the driver status or system messages and try again.",
     "deviceDisabled": "The PawnIO device is disabled in Windows. Kernel sensors remain off. Enable PawnIO in Device Manager and try again.",
     "cancelled": "Administrator permission was canceled; kernel sensors remain off.",

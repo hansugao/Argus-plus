@@ -2,6 +2,7 @@
 //! lanes, the cursor and selection, drags in progress, and the data at hand.
 use super::readings::{Channel, Reading};
 use super::series::{DAY, HOUR, MINUTE, Points, SECOND, min_span};
+use super::transition::{Crossfade, OverlayFade, Reveal, ease_in_out, fade_in};
 use crate::frontend::theme::ease_out as ease;
 use gpui_kit::gpui::{Bounds, Pixels, Point};
 use serde_json::{Value, json};
@@ -12,8 +13,46 @@ use std::time::{Duration, Instant};
 /// Direct input (wheel, keys) and layout changes (ranges, lanes) ease over these.
 pub(super) const FAST: Duration = Duration::from_millis(167);
 pub(super) const SLOW: Duration = Duration::from_millis(250);
+/// How many answers for other windows are kept (`HistoryState::stash`).
+const STASHED: usize = 4;
 /// The narrowest a lane can be dragged, header included.
 pub(super) const MIN_LANE: f32 = 76.;
+/// The lanes as a list arranged by dragging (`reorder`), each by its id.
+pub(super) const LANES: &str = "history-lanes";
+
+/// Whose readings the page draws: the system's recorded history, or one run
+/// of an observed program (`watch_points`). Each has a state of its own; the
+/// one not shown waits in `Desktop::history_parked`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::frontend) enum Source {
+    #[default]
+    System,
+    Watch,
+}
+
+impl Source {
+    /// Where this source keeps preference `name` ("range", "lanes", "band",
+    /// "split"): the system history's keys as they always were, the
+    /// observation's under `watch.`.
+    pub(super) fn pref(self, name: &str) -> String {
+        match (self, name) {
+            (Source::System, "range") => "historyRange".into(),
+            (Source::System, name) => format!("history.{name}"),
+            (Source::Watch, name) => format!("watch.{name}"),
+        }
+    }
+}
+
+/// The observed run the page draws, and when it ran: from its first record to
+/// its last, or on to the present while it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WatchRun {
+    pub(super) pid: u32,
+    pub(super) created: i64,
+    pub(super) first: i64,
+    pub(super) last: i64,
+    pub(super) live: bool,
+}
 
 /// A preset range in the range menu, or one picked by its ends.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,13 +61,23 @@ pub(super) enum Range {
     Last(i64),
     /// Everything recorded, following the clock.
     All,
+    Today,
+    /// A start chosen in the picker, with the end following the clock.
+    Since(i64),
+    /// Fixed ends, picked in the range picker.
+    Fixed(i64, i64),
 }
 
-pub(super) const PRESETS: [(&str, i64); 6] = [
+/// The ranges a saved preference names: the drop-down's, and those it
+/// offered before (kept for preferences saved then, and named as they were
+/// when "Custom…" picks as long a range).
+pub(super) const PRESETS: [(&str, i64); 8] = [
     ("5m", 5 * MINUTE),
     ("1h", HOUR),
+    ("3h", 3 * HOUR),
     ("6h", 6 * HOUR),
     ("1d", DAY),
+    ("3d", 3 * DAY),
     ("7d", 7 * DAY),
     ("30d", 30 * DAY),
 ];
@@ -52,7 +101,63 @@ impl Range {
                 .find(|(_, l)| *l == length)
                 .map(|(id, _)| *id),
             Self::All => Some("all"),
+            Self::Today | Self::Since(_) | Self::Fixed(..) => None,
         }
+    }
+
+    fn start(self, end: i64, first: Option<i64>) -> FollowStart {
+        let (from, minimum) = match self {
+            Self::Last(span) => return FollowStart::Last(span),
+            Self::All => match first {
+                Some(first) => (first, 5 * MINUTE),
+                None => return FollowStart::Last(DAY),
+            },
+            Self::Today => (super::picker::day_start(end), SECOND),
+            Self::Since(from) | Self::Fixed(from, _) => (from, SECOND),
+        };
+        if from <= end - minimum {
+            FollowStart::At(from)
+        } else {
+            FollowStart::Last(minimum)
+        }
+    }
+}
+
+/// A following window either keeps its duration or grows from a timestamp.
+#[derive(Clone, Copy)]
+pub(super) enum FollowStart {
+    At(i64),
+    Last(i64),
+}
+
+impl FollowStart {
+    fn time(self, end: i64) -> i64 {
+        match self {
+            Self::At(from) => from,
+            Self::Last(span) => end - span,
+        }
+    }
+
+    pub(super) fn at(self, end: f64) -> f64 {
+        match self {
+            Self::At(from) => from as f64,
+            Self::Last(span) => end - span as f64,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FlowWindow {
+    pub(super) start: FollowStart,
+    pub(super) sample_end: f64,
+}
+
+impl FlowWindow {
+    /// The texture is built at the sampling cadence and fitted to the
+    /// displayed window between samples.
+    pub(super) fn raster(self) -> (f64, Option<f64>) {
+        let from = self.start.at(self.sample_end);
+        (from, Some((self.sample_end - from).max(1.)))
     }
 }
 
@@ -154,12 +259,11 @@ pub(super) enum Drag {
         moved: bool,
         target: Option<Drop>,
     },
+    /// A lane by its grip (`lanes_order` has where it is).
     Lane {
         id: u64,
         start: Point<Pixels>,
-        at: Point<Pixels>,
         moved: bool,
-        target: Option<Drop>,
     },
 }
 
@@ -174,6 +278,10 @@ pub(super) struct Geometry {
     pub(super) track: Bounds<Pixels>,
     /// The chart card and the page's content, for the splitter.
     pub(super) content: Bounds<Pixels>,
+    /// The table card's head (title, notice) and foot, as tall as they
+    /// wrapped: the card keeps room for them and three rows.
+    pub(super) table_head: Pixels,
+    pub(super) table_foot: Pixels,
 }
 
 impl Geometry {
@@ -184,15 +292,48 @@ impl Geometry {
     }
 }
 
+/// A curve moved with the clock between draws: the plot as the chart card
+/// drew it, and where it was laid out (written when it prepaints).
+pub(super) struct Glide {
+    pub(super) plot: crate::frontend::charts::TimePlot,
+    pub(super) bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    pub(super) start: FollowStart,
+}
+
+/// While the window glides with the clock in the fluid and balanced chart
+/// modes: the curves the chart card drew, when it drew them, and how long
+/// the window takes to move a step. The curves' textures move on every
+/// frame; the labels, gaps and marks the card lays out move a step at a
+/// time, when the card is drawn again.
+pub(super) struct Gliding {
+    pub(super) plots: Vec<Glide>,
+    pub(super) drawn: Instant,
+    pub(super) end: f64,
+    pub(super) step: Duration,
+}
+
 /// The displayed window moving towards the target.
 #[derive(Clone, Copy, Debug)]
 struct Tween {
     from: (f64, f64),
     started: Instant,
     duration: Duration,
+    /// Waiting for a new range's points (`HOLD` at most): the window stays
+    /// where it was until they land, and then eases there with them.
+    held: bool,
+    /// Easing in as well as out: a range switch, whose zoom starts and ends
+    /// gently (the curves' textures keep up with it), where direct input
+    /// answers at once.
+    smooth: bool,
+    /// The navigator's range when the change began.
+    extent_from: (f64, f64),
 }
 
 pub(in crate::frontend) struct HistoryState {
+    /// Whose readings these are.
+    pub(super) source: Source,
+    /// The observed run drawn (`Source::Watch`), once the observation is read.
+    pub(super) run: Option<WatchRun>,
     /// Following the newest readings: the window's end stays on the clock.
     pub(super) follow: bool,
     pub(super) range: Range,
@@ -201,11 +342,27 @@ pub(in crate::frontend) struct HistoryState {
     /// The window asked for, and the one drawn while it eases there.
     pub(super) view: (i64, i64),
     shown: (f64, f64),
+    /// The navigator's range as drawn: easing with the window from the range
+    /// before a switch to the new one.
+    extent_shown: (f64, f64),
+    /// A range switch cross-fading the curves, while it does.
+    pub(super) fading: Option<Crossfade>,
+    /// Counts range switches: the curves of each switch are plots of their
+    /// own (their textures cached apart), so that those of the window before
+    /// it keep theirs while they fade out.
+    pub(super) generation: u64,
     tween: Option<Tween>,
     pub(super) lanes: Vec<Lane>,
     pub(super) active: u64,
     next_lane: u64,
     pub(super) pin: Option<i64>,
+    /// The lane the moment was pinned in: its line and mark are drawn there.
+    pub(super) pin_lane: Option<u64>,
+    /// What the tooltip asked for lists (`TipList`).
+    pub(super) tip_kind: super::tip::TipList,
+    /// Each lane's overlay as last drawn, and those coming in or going.
+    pub(super) overlays_seen: std::collections::HashMap<u64, Option<String>>,
+    pub(super) overlay_fades: std::collections::HashMap<u64, OverlayFade>,
     pub(super) selection: Option<(i64, i64)>,
     pub(super) mode: TableMode,
     pub(super) hover: Option<Hover>,
@@ -221,6 +378,25 @@ pub(in crate::frontend) struct HistoryState {
     pub(super) points: Option<Points>,
     /// The navigator's overview of the whole range.
     pub(super) overview: Option<Points>,
+    /// The points an answer for another window replaced: drawn with the new
+    /// ones (`Points::spliced`) while the window eases from the one to the
+    /// other.
+    pub(super) previous: Option<Points>,
+    /// Answers for other windows, newest first: the ranges switched away
+    /// from, and those the range's drop-down read ahead. Taken up again when
+    /// a window they cover is asked for.
+    pub(super) stash: Vec<Points>,
+    /// The wait for a held window's points: since when, and the timer that
+    /// ends it (`HOLD`).
+    pub(super) hold_wait: Option<(Instant, gpui_kit::gpui::Task<()>)>,
+    /// Where the curves end while following a range in buckets (`reveal_to`),
+    /// and whether that moved in the last draw.
+    pub(super) reveal: Reveal,
+    pub(super) reveal_moving: bool,
+    /// Each lane's axes easing to new ranges, by lane.
+    pub(super) axes: std::collections::HashMap<u64, super::axes::AxisEase>,
+    /// Whether an axis was easing in the last draw.
+    pub(super) axes_moving: bool,
     /// The table's processes: of a moment (`history_frame`), or of a range (`history_table`).
     pub(super) frame: Option<Value>,
     pub(super) table: Option<Value>,
@@ -228,6 +404,23 @@ pub(in crate::frontend) struct HistoryState {
     pub(super) first: Option<i64>,
     /// A short note over the lanes ("Back to the latest"), and when it shows until.
     pub(super) toast: Option<(String, Instant)>,
+    /// The range picker, while it is open.
+    pub(super) picker: Option<super::picker::Picker>,
+    /// The reading chooser, while it is open.
+    pub(super) chooser: Option<super::chooser::Chooser>,
+    /// While the window glides with the clock: where the curves' textures
+    /// start (lanes, navigator), the window drawn when the newest reading came
+    /// in; the window on screen is a little ahead and moves them.
+    pub(super) flow_windows: Option<(FlowWindow, FlowWindow)>,
+    /// The curves the chart card draws, collected while it renders.
+    pub(super) glides: Vec<Glide>,
+    /// While the curves glide frame by frame.
+    pub(super) gliding: Option<Gliding>,
+    /// Frames counted for the balanced chart mode's pace.
+    pub(super) glide_frames: u64,
+    /// What the range pill says for a range picked by name (today, yesterday,
+    /// custom ends), a locale key; none for the drop-down's ranges.
+    pub(super) range_name: Option<&'static str>,
     /// Restored from the preferences once.
     pub(super) restored: bool,
     /// Theme and language the readings' names and colours were made for.
@@ -236,29 +429,168 @@ pub(in crate::frontend) struct HistoryState {
     pub(super) channels_asked: Option<Instant>,
     pub(super) range_asked: Option<Instant>,
     pub(super) points_asked: Option<Instant>,
+    /// The window's points were wanted while a query was on its way.
+    pub(super) points_again: bool,
     pub(super) overview_asked: Option<Instant>,
     pub(super) frame_at: Option<i64>,
-    pub(super) table_for: Option<(i64, i64, &'static str)>,
-    pub(super) table_asked: Option<Instant>,
     /// Table rows expanded to their instances, by name.
     pub(super) expanded: std::collections::HashSet<String>,
+    /// What each process name is, for the table's categories, and the
+    /// categories folded (`history.foldedSections`).
+    pub(super) kinds: Kinds,
+    pub(super) folded: std::collections::HashSet<String>,
+    /// A lane dragged by its grip, and the lanes gliding aside (`LANES`).
+    pub(super) lanes_order: crate::frontend::reorder::Reorder,
+    /// The lanes that do not fit the card scroll there.
+    pub(super) lanes_scroll: gpui_kit::gpui::ScrollHandle,
     /// The table's selected row (name, or name and PID).
     pub(super) selected: Option<String>,
+    /// The processes the tooltip ranks, for the point (start, span) they were asked for.
+    pub(super) tip: Option<((i64, i64), Value)>,
+    pub(super) tip_for: Option<(i64, i64)>,
+    /// Each process's trend over the window, for the table in moment mode.
+    pub(super) trends: Option<Value>,
+    /// The process drawn on the lanes as a dashed curve, by name, and its
+    /// readings over the window by trend key.
+    pub(super) curve: Option<String>,
+    pub(super) curves: std::collections::HashMap<&'static str, Value>,
+    /// What each range-table query was last sent for, and when.
+    pub(super) ranges_asked: std::collections::HashMap<String, (RangeAsked, Instant)>,
+}
+
+/// A range-table query's window and trend: from, to, the trend's reading and
+/// how many points it has.
+pub(super) type RangeAsked = (i64, i64, &'static str, usize);
+
+/// The process page's categories, which the table takes when sorted by name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Section {
+    Apps,
+    Background,
+    Windows,
+}
+
+impl Section {
+    pub(super) const ALL: [Section; 3] = [Section::Apps, Section::Background, Section::Windows];
+
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Section::Apps => "apps",
+            Section::Background => "background",
+            Section::Windows => "windows",
+        }
+    }
+
+    /// The category of running instances, as the process page decides it:
+    /// an app when one owns a taskbar window, Windows' own when all are.
+    pub(super) fn of(app: bool, windows: bool) -> Self {
+        if app {
+            Section::Apps
+        } else if windows {
+            Section::Windows
+        } else {
+            Section::Background
+        }
+    }
+}
+
+/// What the process names seen running are, so that the table sorts records
+/// into the process page's categories, which they do not keep: names that
+/// owned a taskbar window at some point, and names whose running instances
+/// were all Windows' own when last seen. Learned from the samples and kept
+/// in the preferences (`history.kinds`), so that programs no longer running
+/// sort the same; a name never seen counts as a background process.
+#[derive(Default)]
+pub(super) struct Kinds {
+    apps: std::collections::HashSet<String>,
+    windows: std::collections::HashSet<String>,
+    pub(super) loaded: bool,
+}
+
+impl Kinds {
+    /// The most names kept of each kind.
+    const MOST: usize = 2000;
+
+    pub(super) fn from_saved(saved: &Value) -> Self {
+        let names = |key: &str| {
+            saved[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(Self::MOST)
+                .map(str::to_lowercase)
+                .collect()
+        };
+        Self {
+            apps: names("apps"),
+            windows: names("windows"),
+            loaded: true,
+        }
+    }
+
+    pub(super) fn saved(&self) -> Value {
+        let sorted = |set: &std::collections::HashSet<String>| {
+            let mut names = set.iter().cloned().collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        json!({"apps": sorted(&self.apps), "windows": sorted(&self.windows)})
+    }
+
+    /// Notes what the instances of `name` running now are. True when that
+    /// changed what the name is.
+    pub(super) fn note(&mut self, name: &str, app: bool, windows: bool) -> bool {
+        let name = name.to_lowercase();
+        let mut changed = false;
+        if app && !self.apps.contains(&name) && self.apps.len() < Self::MOST {
+            self.apps.insert(name.clone());
+            changed = true;
+        }
+        if windows {
+            if !self.windows.contains(&name) && self.windows.len() < Self::MOST {
+                self.windows.insert(name);
+                changed = true;
+            }
+        } else {
+            changed |= self.windows.remove(&name);
+        }
+        changed
+    }
+
+    pub(super) fn section(&self, name: &str) -> Section {
+        let name = name.to_lowercase();
+        Section::of(self.apps.contains(&name), self.windows.contains(&name))
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.apps.clear();
+        self.windows.clear();
+    }
 }
 
 impl Default for HistoryState {
     fn default() -> Self {
         Self {
+            source: Source::System,
+            run: None,
             follow: true,
             range: Range::Last(5 * MINUTE),
             extent: (0, 5 * MINUTE),
             view: (0, 5 * MINUTE),
             shown: (0., (5 * MINUTE) as f64),
             tween: None,
+            extent_shown: (0., 0.),
+            fading: None,
+            generation: 0,
             lanes: vec![Lane::new(1, "cpu".into(), None, 1.)],
             active: 1,
             next_lane: 2,
             pin: None,
+            pin_lane: None,
+            tip_kind: super::tip::TipList::Nothing,
+            overlays_seen: Default::default(),
+            overlay_fades: Default::default(),
             selection: None,
             mode: TableMode::Moment,
             hover: None,
@@ -270,32 +602,100 @@ impl Default for HistoryState {
             readings: Vec::new(),
             points: None,
             overview: None,
+            previous: None,
+            stash: Vec::new(),
+            hold_wait: None,
+            reveal: Reveal::default(),
+            reveal_moving: false,
+            axes: Default::default(),
+            axes_moving: false,
             frame: None,
             table: None,
             first: None,
             toast: None,
+            picker: None,
+            chooser: None,
+            flow_windows: None,
+            glides: Vec::new(),
+            gliding: None,
+            glide_frames: 0,
+            range_name: None,
             restored: false,
             catalogue_key: (false, u8::MAX),
             channels_asked: None,
             range_asked: None,
             points_asked: None,
+            points_again: false,
             overview_asked: None,
             frame_at: None,
-            table_for: None,
-            table_asked: None,
             expanded: Default::default(),
+            kinds: Kinds::default(),
+            folded: Default::default(),
+            lanes_order: Default::default(),
+            lanes_scroll: gpui_kit::gpui::ScrollHandle::new(),
             selected: None,
+            tip: None,
+            tip_for: None,
+            trends: None,
+            curve: None,
+            curves: Default::default(),
+            ranges_asked: Default::default(),
         }
     }
 }
 
 impl HistoryState {
+    /// The observation's state: a lane of the private working set with the
+    /// private commit over it, over the whole run.
+    pub(in crate::frontend) fn watch() -> Self {
+        Self {
+            source: Source::Watch,
+            lanes: vec![Lane::new(1, "memory".into(), Some("commit".into()), 1.)],
+            ..Self::default()
+        }
+    }
+
+    /// Draws `run` from now on: another run forgets what was read for the
+    /// one before and takes up the saved range again over its own records
+    /// (`history_restore`). Whether the run changed.
+    pub(super) fn set_run(&mut self, run: Option<WatchRun>) -> bool {
+        let same = self.run.map(|r| (r.pid, r.created)) == run.map(|r| (r.pid, r.created));
+        self.first = run.map(|run| run.first);
+        self.run = run;
+        if same {
+            return false;
+        }
+        self.points = None;
+        self.overview = None;
+        self.previous = None;
+        self.stash.clear();
+        self.pin = None;
+        self.pin_lane = None;
+        self.selection = None;
+        self.hover = None;
+        self.tip = None;
+        self.tip_for = None;
+        self.points_asked = None;
+        self.overview_asked = None;
+        self.follow = true;
+        self.restored = false;
+        true
+    }
+
     pub(super) fn span(&self) -> i64 {
         (self.view.1 - self.view.0).max(SECOND)
     }
     /// The window drawn in the last frame.
     pub(super) fn shown_now(&self) -> (f64, f64) {
         self.shown
+    }
+    /// The navigator's range drawn in the last frame.
+    pub(super) fn extent_shown(&self) -> (f64, f64) {
+        if self.extent_shown.1 > self.extent_shown.0 {
+            self.extent_shown
+        } else {
+            (self.extent.0 as f64, self.extent.1 as f64)
+        }
     }
     pub(super) fn length(&self) -> i64 {
         (self.extent.1 - self.extent.0).max(SECOND)
@@ -307,46 +707,99 @@ impl HistoryState {
         if !self.follow {
             return;
         }
-        let span = self.span();
-        let length = match self.range {
-            Range::All => {
-                clock
-                    - self
-                        .first
-                        .unwrap_or(clock - self.length())
-                        .min(clock - span)
-            }
-            _ => self.length(),
-        };
-        let end = if span > 6 * HOUR {
+        let (view, extent) = self.follow_starts(clock);
+        let end = if clock - view.time(clock) > 6 * HOUR {
             clock.div_euclid(MINUTE) * MINUTE
         } else {
             clock
         };
-        self.view = (end - span.min(length), end);
-        self.extent = (end - length, end);
+        self.extent = (extent.time(end), end);
+        self.view = (view.time(end).max(self.extent.0), end);
+    }
+
+    fn follow_starts(&self, end: i64) -> (FollowStart, FollowStart) {
+        let extent = self.range.start(end, self.first);
+        let view = if self.view == self.extent || self.span() >= end - extent.time(end) {
+            extent
+        } else {
+            FollowStart::Last(self.span())
+        };
+        (view, extent)
+    }
+
+    pub(super) fn show_flow(&mut self, end: f64, sample: i64) {
+        let (view, extent) = self.follow_starts(end.floor() as i64);
+        self.shown = (view.at(end), end);
+        self.extent_shown = (extent.at(end), end);
+        let window = |start| FlowWindow {
+            start,
+            sample_end: sample as f64,
+        };
+        self.flow_windows = Some((window(view), window(extent)));
     }
 
     /// The window drawn now, easing towards the target; whether it still moves.
     pub(super) fn shown(&mut self, now: Instant, motion: bool) -> ((f64, f64), bool) {
         let target = (self.view.0 as f64, self.view.1 as f64);
+        let extent = (self.extent.0 as f64, self.extent.1 as f64);
+        self.fading = None;
         let Some(tween) = self.tween.filter(|_| motion) else {
             self.tween = None;
             self.shown = target;
+            self.extent_shown = extent;
             return (target, false);
         };
+        // Waiting for the new range's points: still where it was.
+        if tween.held {
+            self.shown = tween.from;
+            self.extent_shown = tween.extent_from;
+            return (tween.from, false);
+        }
         let progress = (now.saturating_duration_since(tween.started).as_secs_f64()
             / tween.duration.as_secs_f64().max(1e-6))
         .clamp(0., 1.);
-        let e = f64::from(ease(progress as f32));
-        self.shown = (
-            tween.from.0 + (target.0 - tween.from.0) * e,
-            tween.from.1 + (target.1 - tween.from.1) * e,
-        );
+        let e = f64::from(if tween.smooth {
+            ease_in_out(progress as f32)
+        } else {
+            ease(progress as f32)
+        });
+        self.shown = super::series::zoom_between(tween.from, target, e);
+        self.extent_shown = super::series::zoom_between(tween.extent_from, extent, e);
+        self.fading = (tween.smooth && progress < 1.).then(|| {
+            // Narrowing, the new curves cover only the end of the window shown
+            // (their points are read for the window they go to): they come in
+            // as they cover it, the old ones holding the rest until then.
+            let cover = ((target.1 - target.0) * 1.25 / (self.shown.1 - self.shown.0).max(1.))
+                .min(1.) as f32;
+            let covered = ((cover - 0.5) / 0.5).clamp(0., 1.);
+            Crossfade {
+                from: tween.from,
+                extent_from: tween.extent_from,
+                alpha: fade_in(progress as f32).min(covered * covered * (3. - 2. * covered)),
+            }
+        });
         if progress >= 1. {
             self.tween = None;
         }
         (self.shown, self.tween.is_some())
+    }
+
+    /// Puts the window and the lanes where they are going, without easing:
+    /// for a page coming into view. Eased from where it was when the page was
+    /// last shown, or from nowhere the first time, the window swept the time
+    /// axis across all that lies between while the page slid in.
+    pub(super) fn settle(&mut self) {
+        self.tween = None;
+        self.fading = None;
+        self.previous = None;
+        self.extent_shown = (self.extent.0 as f64, self.extent.1 as f64);
+        self.shown = (self.view.0 as f64, self.view.1 as f64);
+        self.lanes.retain(|lane| !lane.removing);
+        for lane in &mut self.lanes {
+            lane.shown = lane.weight;
+            lane.from = lane.weight;
+            lane.started = None;
+        }
     }
 
     /// Moves the target, the drawn window easing there from where it is.
@@ -355,9 +808,111 @@ impl HistoryState {
             from: self.shown,
             started: Instant::now(),
             duration,
+            held: false,
+            smooth: false,
+            extent_from: self.extent_shown,
         });
         if duration.is_zero() {
             self.shown = (self.view.0 as f64, self.view.1 as f64);
+        }
+    }
+
+    /// Eases to the window asked for once its points land, or `HOLD` has
+    /// passed (`release_hold`).
+    fn retarget_held(&mut self, duration: Duration) {
+        self.retarget(duration);
+        if let Some(tween) = &mut self.tween {
+            tween.held = true;
+            tween.smooth = true;
+        }
+    }
+
+    /// The switch whose curves are the window's own: the one before the
+    /// latest while the window waits for the points of the new range.
+    pub(super) fn drawn_generation(&self) -> u64 {
+        if self.held_since().is_some() {
+            self.generation.wrapping_sub(1)
+        } else {
+            self.generation
+        }
+    }
+
+    /// Since when the window has waited for its points, while it does.
+    pub(super) fn held_since(&self) -> Option<Instant> {
+        self.tween
+            .filter(|tween| tween.held)
+            .map(|tween| tween.started)
+    }
+
+    /// The new range's points landed, or have been waited for long enough:
+    /// the window eases there from now. Whether it was waiting.
+    pub(super) fn release_hold(&mut self) -> bool {
+        self.hold_wait = None;
+        match &mut self.tween {
+            Some(tween) if tween.held => {
+                tween.held = false;
+                tween.started = Instant::now();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Where the curves end while following a range in buckets: at the newest
+    /// complete bucket (`settled`), the bucket still filling left out (its
+    /// value moved with every reading). One that completes is drawn on over
+    /// `REVEAL`; a jump (another range, a gap, the first answer) shows at
+    /// once. Whether it still moves.
+    pub(super) fn reveal_to(
+        &mut self,
+        settled: i64,
+        bucket: i64,
+        now: Instant,
+        motion: bool,
+    ) -> (i64, bool) {
+        let target = settled as f64;
+        if self.reveal.to != target {
+            let shown = self.reveal.at(now);
+            let step = target - self.reveal.to;
+            self.reveal = if motion && step > 0. && step <= 3. * bucket as f64 && shown < target {
+                Reveal {
+                    from: shown,
+                    to: target,
+                    started: Some(now),
+                }
+            } else {
+                Reveal {
+                    from: target,
+                    to: target,
+                    started: None,
+                }
+            };
+        }
+        let shown = self.reveal.at(now);
+        (shown.round() as i64, shown < self.reveal.to)
+    }
+
+    /// The points an answer for another window replaces: drawn with it while
+    /// the window eases, and kept for a return to their window.
+    pub(super) fn set_aside(&mut self, old: Points) {
+        self.stash_points(old.clone());
+        self.previous = Some(old);
+    }
+
+    /// Keeps points for another window, in place of any for the same query.
+    pub(super) fn stash_points(&mut self, points: Points) {
+        self.stash
+            .retain(|kept| !kept.matches(points.bucket, points.origin, &points.keys));
+        self.stash.insert(0, points);
+        self.stash.truncate(STASHED);
+    }
+
+    /// What the lanes draw: the points, spliced with those they replaced
+    /// while the window eases from them.
+    pub(super) fn drawn_points(&self) -> Option<Points> {
+        match (&self.points, &self.previous) {
+            (Some(points), Some(previous)) => Some(points.spliced(previous)),
+            (points, _) => points.clone(),
         }
     }
 
@@ -377,42 +932,76 @@ impl HistoryState {
     /// A range from the menu: the last so long (or everything), following the
     /// clock; or fixed ends, unless they reach the present.
     pub(super) fn set_range(&mut self, range: Range, clock: i64) {
+        self.generation = self.generation.wrapping_add(1);
         self.range = range;
+        self.range_name = None;
         self.pin = None;
         self.selection = None;
         self.mode = TableMode::Moment;
         match range {
-            Range::Last(length) => {
+            Range::Last(_) | Range::All | Range::Today | Range::Since(_) => {
                 self.follow = true;
-                self.extent = (clock - length, clock);
+                self.extent = (range.start(clock, self.first).time(clock), clock);
                 self.view = self.extent;
             }
-            Range::All => {
-                self.follow = true;
-                let first = self.first.unwrap_or(clock - DAY).min(clock - 5 * MINUTE);
-                self.extent = (first, clock);
+            Range::Fixed(from, to) => {
+                self.follow = false;
+                self.extent = (from, to.max(from + MINUTE));
                 self.view = self.extent;
             }
         }
-        self.retarget(SLOW);
+        // Longer the more the scale changes, so that the zoom keeps a pace the
+        // eye can follow: from 250 ms, 30 ms more for each doubling, up to
+        // 420 ms (five minutes to three hours and beyond).
+        let was = (self.shown.1 - self.shown.0).max(1.);
+        let will = ((self.view.1 - self.view.0) as f64).max(1.);
+        let doublings = (will / was).max(was / will).log2();
+        self.retarget_held(SLOW + Duration::from_secs_f64((doublings * 0.03).clamp(0., 0.17)));
+    }
+
+    /// Fixed ends from the range picker, not following the clock.
+    pub(super) fn set_fixed(&mut self, from: i64, to: i64) {
+        self.set_range(Range::Fixed(from, to), to);
     }
 
     /// Back to the newest readings, following them, at the width shown.
     pub(super) fn go_latest(&mut self, clock: i64) {
-        let span = self.span().min(self.length());
         let length = self.length();
+        // Fixed ends give way to as long a range following the clock.
+        if let Range::Fixed(..) = self.range {
+            self.range = Range::Last(length);
+            self.range_name = None;
+        }
         self.follow = true;
         self.pin = None;
         self.selection = None;
         self.mode = TableMode::Moment;
-        self.extent = (clock - length, clock);
-        self.view = (clock - span, clock);
+        self.anchor(clock);
         self.retarget(SLOW);
     }
 
     /// Stops following where the window is.
     pub(super) fn pause(&mut self) {
         self.follow = false;
+    }
+
+    /// Zooms by `factor` about `at` (the time under the pointer), which keeps
+    /// its place, and holds the window there: the wheel, following or not.
+    /// Whether the window changed (at the whole range, zooming out does not).
+    pub(super) fn zoom_at(&mut self, factor: f64, at: i64, duration: Duration) -> bool {
+        let length = self.length();
+        let narrowest = min_span(length);
+        let span = ((self.span() as f64 * factor).round() as i64).clamp(narrowest, length);
+        let (a, b) = self.view;
+        let at = at.clamp(a, b);
+        let ratio = (at - a) as f64 / (b - a).max(1) as f64;
+        let from = (at - (span as f64 * ratio).round() as i64)
+            .clamp(self.extent.0, (self.extent.1 - span).max(self.extent.0));
+        if (from, from + span) == (a, b) {
+            return false;
+        }
+        self.set_window(from, from + span, duration);
+        true
     }
 
     /// Zooms by `factor` around `at`; while following the end stays on the clock.
@@ -561,18 +1150,16 @@ impl HistoryState {
     }
 
     /// Moves the lane `id` to `index` (counted before it is taken out).
-    pub(super) fn move_lane(&mut self, id: u64, index: usize) {
-        let Some(from) = self.lanes.iter().position(|lane| lane.id == id) else {
-            return;
+    /// Puts the lanes in `order` (by id), as a drag arranged them; any not in
+    /// it keep their turn after those that are.
+    pub(super) fn arrange_lanes(&mut self, order: &[u64]) {
+        let turn = |lane: &Lane| {
+            order
+                .iter()
+                .position(|id| *id == lane.id)
+                .unwrap_or(order.len())
         };
-        let mut to = index;
-        if to > from {
-            to -= 1;
-        }
-        if to != from {
-            let lane = self.lanes.remove(from);
-            self.lanes.insert(to.min(self.lanes.len()), lane);
-        }
+        self.lanes.sort_by_key(turn);
     }
 
     /// Steps the lanes' heights; whether any still moves.
@@ -677,11 +1264,31 @@ impl HistoryState {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryState, Range, TableMode};
+    use super::{HistoryState, Kinds, Range, Section, TableMode};
     use crate::frontend::pages::history::series::{HOUR, MINUTE, SECOND};
     use std::time::Duration;
 
     const NOW: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn names_keep_the_category_they_were_seen_in() {
+        let mut kinds = Kinds::default();
+        assert!(kinds.note("Code.exe", true, false));
+        assert!(kinds.note("svchost.exe", false, true));
+        assert!(
+            !kinds.note("code.exe", false, false),
+            "an app stays one once it had a window"
+        );
+        assert_eq!(kinds.section("CODE.EXE"), Section::Apps);
+        assert_eq!(kinds.section("svchost.exe"), Section::Windows);
+        assert_eq!(kinds.section("never-seen.exe"), Section::Background);
+        // Windows' own only while every instance seen is.
+        assert!(kinds.note("svchost.exe", false, false));
+        assert_eq!(kinds.section("svchost.exe"), Section::Background);
+        let restored = Kinds::from_saved(&kinds.saved());
+        assert_eq!(restored.section("code.exe"), Section::Apps);
+        assert!(restored.loaded);
+    }
 
     #[test]
     fn following_ties_the_window_to_the_clock_and_zoom_keeps_its_end() {
@@ -719,6 +1326,69 @@ mod tests {
     }
 
     #[test]
+    fn all_records_keep_the_full_window_as_records_arrive_and_expire() {
+        let mut state = HistoryState::default();
+        state.set_range(Range::All, NOW);
+        state.first = Some(NOW - 8 * HOUR + 13 * SECOND);
+        state.anchor(NOW + 29 * SECOND);
+        assert_eq!(state.extent, (state.first.unwrap(), NOW));
+        assert_eq!(state.view, state.extent);
+        state.first = Some(NOW - 10 * MINUTE);
+        state.anchor(NOW + SECOND);
+        assert_eq!(state.view, (NOW - 10 * MINUTE, NOW + SECOND));
+        assert_eq!(state.view, state.extent);
+
+        state.zoom(0.5, NOW, Duration::ZERO);
+        let span = state.span();
+        state.anchor(NOW + 2 * MINUTE);
+        assert_eq!(state.view, (NOW + 2 * MINUTE - span, NOW + 2 * MINUTE));
+        assert_eq!(state.extent.0, NOW - 10 * MINUTE);
+        let end = state.view.1 as f64 + 0.75;
+        state.show_flow(end, NOW + 2 * MINUTE + SECOND);
+        assert_eq!(state.shown_now(), (end - span as f64, end));
+        assert_eq!(state.extent_shown(), ((NOW - 10 * MINUTE) as f64, end));
+        state.reset_zoom();
+        state.pause();
+        let paused = state.view;
+        state.anchor(NOW + 3 * MINUTE);
+        assert_eq!(state.view, paused);
+        state.go_latest(NOW + 3 * MINUTE);
+        assert_eq!(state.view, (NOW - 10 * MINUTE, NOW + 3 * MINUTE));
+        assert_eq!(state.view, state.extent);
+    }
+
+    #[test]
+    fn a_new_observation_rolls_for_five_minutes_then_keeps_its_first_record() {
+        let mut state = HistoryState::watch();
+        assert_eq!(state.range, Range::Last(5 * MINUTE));
+        state.first = Some(NOW);
+        state.set_range(Range::All, NOW);
+        state.anchor(NOW + 4 * MINUTE);
+        assert_eq!(state.view, (NOW - MINUTE, NOW + 4 * MINUTE));
+        state.anchor(NOW + 6 * MINUTE);
+        assert_eq!(state.view, (NOW, NOW + 6 * MINUTE));
+        let end = (NOW + 6 * MINUTE) as f64 + 0.5;
+        state.show_flow(end, NOW + 6 * MINUTE + SECOND);
+        assert_eq!(state.shown_now(), (NOW as f64, end));
+        assert_eq!(state.shown_now(), state.extent_shown());
+    }
+
+    #[test]
+    fn custom_start_and_today_keep_their_calendar_boundaries() {
+        let mut state = HistoryState::default();
+        let midnight = super::super::picker::day_start(NOW);
+        state.set_range(Range::Today, midnight - SECOND);
+        state.anchor(midnight + 10 * SECOND);
+        assert_eq!(state.view, (midnight, midnight + 10 * SECOND));
+        state.zoom(0.5, midnight, Duration::ZERO);
+        assert_eq!(state.view, state.extent);
+        state.set_range(Range::Since(NOW - HOUR), NOW);
+        state.anchor(NOW + MINUTE);
+        assert_eq!(state.view, (NOW - HOUR, NOW + MINUTE));
+        assert_eq!(state.view, state.extent);
+    }
+
+    #[test]
     fn saved_ranges_read_back_and_unknown_ones_fall_back() {
         assert_eq!(Range::parse("24h"), Range::Last(24 * HOUR));
         assert_eq!(Range::parse("all"), Range::All);
@@ -730,7 +1400,7 @@ mod tests {
         let mut state = HistoryState::default();
         state.insert_lane("memUsed".into(), 1, false);
         state.insert_lane("disk".into(), 2, false);
-        state.move_lane(3, 0);
+        state.arrange_lanes(&[3, 1, 2]);
         assert_eq!(
             state
                 .lanes

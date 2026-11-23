@@ -12,6 +12,7 @@
     "mappedFile": "Le fichier programme d’Argus est toujours mappé en mémoire. Quittez les programmes qui l’utilisent ou enregistrez votre travail et redémarrez le PC avant de réessayer.",
     "diskFull": "Il n’y a pas assez d’espace disque libre pour écrire le fichier programme. Libérez de l’espace et réessayez.",
     "copyFailed": "Le fichier programme n’a pas pu être mis à jour. Vérifiez les fichiers et le répertoire d’installation à l’aide du code d’erreur et du journal de diagnostic.",
+    "folderFailed": "Le dossier d’installation n’a pas pu être préparé. Vérifiez l’emplacement d’installation à l’aide du code d’erreur et du journal de diagnostic.",
     "unsafeTarget": "Le chemin du fichier programme pointe vers un lien ou un dossier. La mise à jour a été arrêtée. Vérifiez l’emplacement d’installation et réessayez.",
     "restartRequired": "Windows ne peut pas libérer le fichier programme pour le moment. Enregistrez votre travail et redémarrez le PC avant l’installation.",
     "checkFailed": "Windows n’a pas pu terminer la vérification du fichier programme. L’étape ayant échoué a été enregistrée dans le journal.",
@@ -24,7 +25,15 @@
     "retryHint": "Libérez le fichier ou résolvez la cause ci-dessus, puis cliquez sur Réessayer pour continuer. Cliquez sur Annuler pour quitter l’installation.",
     "errorCode": "Code d’erreur : {code}",
     "logPath": "Journal de diagnostic : {path}",
-    "logFailed": "Le journal n’a pas pu être écrit. Code d’erreur : {code}"
+    "logFailed": "Le journal n’a pas pu être écrit. Code d’erreur : {code}",
+    "locationRisk": "Impossible de garantir que seuls les administrateurs peuvent modifier l’emplacement d’installation « {path} » :",
+    "locationDrive": "Le lecteur ne conserve pas les autorisations de fichiers ou n’est pas un lecteur fixe de cet ordinateur (par exemple une clé USB, un emplacement réseau ou une partition FAT).",
+    "locationParent": "D’autres comptes peuvent renommer le dossier parent « {path} » ou modifier ses autorisations.",
+    "locationShared": "Le dossier contient déjà d’autres fichiers, dont le programme d’installation ne modifie pas les autorisations.",
+    "locationEffect": "L’installation, la mise à jour et la désinstallation d’Argus, ainsi que l’installation du service privilégié, exécutent des programmes de cet emplacement en tant qu’administrateur. D’autres comptes pourraient les y remplacer pour obtenir des droits d’administrateur.",
+    "locationAdvice": "Il est recommandé d’installer Argus à l’emplacement par défaut, {default}, ou dans un nouveau dossier à la racine d’un lecteur, par exemple {example}.",
+    "locationAdviceDefault": "Il est recommandé d’installer Argus à l’emplacement par défaut, {default}.",
+    "locationContinue": "Installer quand même à cet emplacement ?"
   },
   "tray": {
     "show": "Afficher Argus",
@@ -73,7 +82,7 @@
       "ipv4Only": "Seules les connexions IPv4 TCP peuvent être fermées"
     },
     "fileLock": {
-      "restartManagerFailed": "Restart Manager n’a pas pu vérifier la cible ; les résultats ci-dessous proviennent de la recherche de handles"
+      "restartManagerFailed": "La vérification des fichiers n’a pas pu aboutir ; les résultats proviennent uniquement de la recherche de handles"
     },
     "handles": {
       "tooMany": "Vous pouvez rechercher jusqu’à 32 chemins à la fois, pour une longueur totale maximale de 8 KiB",
@@ -121,6 +130,7 @@
       "helperExited": "L’assistant de recherche de handles s’est arrêté prématurément ; seuls les résultats terminés sont affichés",
       "serviceIncomplete": "Le service privilégié n’a pas complété cette recherche, les résultats locaux sont donc affichés : {error}",
       "serviceIncompleteLocal": "Le service privilégié n’a pas complété cette recherche ; les résultats de la recherche locale sont affichés",
+      "bothIncomplete": "Ni le service privilégié ni la recherche locale n’ont abouti : {error}",
       "unavailable": "La recherche est temporairement indisponible",
       "serviceOutdated": "Le service privilégié ne prend pas en charge les recherches de handles, alors mettez à jour le service ; les résultats de la recherche locale sont affichés",
       "serviceUnavailable": "Le service privilégié n’est pas disponible, les résultats de la recherche locale sont donc affichés : {error}"
@@ -231,7 +241,7 @@
     "driverInUse": "PawnIO ne peut pas s’arrêter pour le moment ou est toujours utilisé par une autre application. La mise à niveau a été arrêtée. Fermez les autres applications qui utilisent des capteurs matériels et réessayez ; si l’échec persiste, redémarrez Windows et réessayez.",
     "unsafeDriverPath": "Le propriétaire, les autorisations ou les liens du chemin du pilote PawnIO n’ont pas passé la vérification de sécurité. L’activation a été arrêtée. Demandez à un administrateur de vérifier le fichier du pilote et ses répertoires parents.",
     "writableDriverStore": "Le répertoire du magasin de pilotes Windows DriverStore\\FileRepository permet aux utilisateurs standard d’écrire. PawnIO n’a pas été activé. Demandez à un administrateur de restaurer les autorisations de ce répertoire, puis réessayez.",
-    "unsafeSetupPath": "Le répertoire temporaire de l’installateur PawnIO n’a pas passé la vérification du propriétaire, des autorisations ou des liens. L’opération a été arrêtée. Un administrateur doit vérifier Program Files\\Argus Sensor Setup et son dossier parent.",
+    "unsafeSetupPath": "Le répertoire temporaire de l’installateur PawnIO n’a pas passé la vérification du propriétaire, des autorisations ou des liens. L’opération a été arrêtée. Un administrateur doit vérifier Program Files\\Argus Privileged\\setup et son dossier parent.",
     "notReady": "PawnIO ne fonctionne pas correctement. Les capteurs du noyau restent éteints. Vérifiez l’état du pilote ou les messages système et réessayez.",
     "deviceDisabled": "Le périphérique PawnIO est désactivé dans Windows. Les capteurs du noyau restent éteints. Activez PawnIO dans le Gestionnaire de périphériques et réessayez.",
     "cancelled": "La demande d’autorisation d’administrateur a été annulée. Les capteurs du noyau restent désactivés.",

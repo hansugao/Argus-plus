@@ -31,6 +31,15 @@ fn section_icon(section: &str) -> &'static str {
         _ => "InfoIcon",
     }
 }
+/// The setting that holds the background interval for `away`
+/// ("minimized" or "tray").
+fn background_field(away: &str) -> &'static str {
+    if away == "minimized" {
+        "minimizedInterval"
+    } else {
+        "trayInterval"
+    }
+}
 const RULE_PRIORITIES: [&str; 6] = [
     "realtime",
     "high",
@@ -45,7 +54,7 @@ const HOTKEY_QUIET_MS: u64 = 1_500;
 const HOTKEY_DONE_MS: u64 = 1_600;
 
 /// A short local time for "last checked" (month-day hour:minute).
-fn short_time(ms: i64) -> String {
+pub(super) fn short_time(ms: i64) -> String {
     let Ok(value) = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)) else {
         return label("format.missing");
     };
@@ -242,7 +251,7 @@ impl Desktop {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn setting_card(
+    pub(in crate::frontend) fn setting_card(
         &self,
         id: &str,
         glyph: AnyElement,
@@ -451,10 +460,14 @@ impl Desktop {
             .into_any_element()
     }
 
-    /// A settings toggle running a command with `{argument: !value}`.
+    /// A settings toggle running a command with `{argument: !value}`,
+    /// named for assistive technology by the catalog text `title`: the title
+    /// of the setting it switches.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::frontend) fn setting_toggle(
         &self,
         id: &str,
+        title: &str,
         value: bool,
         command: &str,
         argument: &str,
@@ -465,7 +478,7 @@ impl Desktop {
         let argument = argument.to_owned();
         self.toggle(
             id.to_owned(),
-            id.to_owned(),
+            label(title),
             value,
             false,
             move |this, on, window, cx| {
@@ -699,22 +712,20 @@ impl Desktop {
     }
 
     /// How often to sample while minimized or in the tray; under 5 s only
-    /// after a warning.
+    /// after a warning. `superseded` while a monitor keeps sampling at the
+    /// refresh interval (`background_superseded`): faded, yet it still takes
+    /// a choice for when the interval applies again.
     pub(in crate::frontend) fn background_select(
         &self,
         place: &str,
         away: &'static str,
+        superseded: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let settings = &self.data["settings"];
-        let field = if away == "minimized" {
-            "minimizedInterval"
-        } else {
-            "trayInterval"
-        };
-        let current = settings[field].as_u64();
+        let current = settings[background_field(away)].as_u64();
         let choices = crate::settings::BACKGROUND_INTERVALS;
-        self.select(
+        self.select_superseded(
             format!("{place}-background-{away}"),
             label(&format!("settings.data.{away}.title")),
             choices
@@ -722,7 +733,7 @@ impl Desktop {
                 .map(|ms| tr!("shell.interval.option", seconds = crate::regional::seconds(*ms)))
                 .collect(),
             choices.iter().position(|ms| Some(*ms) == current),
-            false,
+            superseded,
             move |this, index, window, cx| {
                 let ms = choices[index];
                 let save = move |this: &mut Desktop, window: &mut Window, cx: &mut Context<Desktop>| {
@@ -751,6 +762,73 @@ impl Desktop {
             },
             cx,
         )
+    }
+
+    /// A background interval's card. While the interval does not apply (the
+    /// desktop or taskbar monitor keeps sampling at the refresh interval,
+    /// `shell::sampling_state`), its drop-down is faded and a note under the
+    /// description says which monitor and how often it samples instead.
+    pub(in crate::frontend) fn background_card(
+        &self,
+        place: &str,
+        id: &str,
+        glyph: &str,
+        away: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let superseded = self.background_superseded(away);
+        let select = self.background_select(place, away, superseded.is_some(), cx);
+        let desc = div()
+            .child(label(&format!("settings.data.{away}.desc")))
+            .children(superseded.map(|monitors| self.background_pace_note(monitors)));
+        self.setting(
+            id,
+            self.glyph(glyph),
+            label(&format!("settings.data.{away}.title")),
+            Some(desc.into_any_element()),
+            None,
+            vec![select],
+        )
+    }
+
+    /// Whether the desktop and the taskbar monitor are on, when either is
+    /// and so keeps sampling at the refresh interval instead of `away`'s;
+    /// none while that is the refresh interval anyway.
+    fn background_superseded(&self, away: &str) -> Option<(bool, bool)> {
+        let settings = &self.data["settings"];
+        if settings[background_field(away)].as_u64() == Some(self.interval) {
+            return None;
+        }
+        // As `sync_monitors` and `shell::apply_taskbar_monitor` decide.
+        let desktop = &settings["desktopMonitor"];
+        let desktop = desktop["enabled"].as_bool() == Some(true)
+            && desktop["metrics"].as_array().is_some_and(|m| !m.is_empty());
+        let taskbar = settings["taskbarMonitor"]["enabled"].as_bool() == Some(true);
+        (desktop || taskbar).then_some((desktop, taskbar))
+    }
+
+    /// Which monitors keep the refresh interval, and how often that samples.
+    fn background_pace_note(&self, (desktop, taskbar): (bool, bool)) -> AnyElement {
+        let seconds = crate::regional::seconds(self.interval);
+        let text = match (desktop, taskbar) {
+            (true, true) => tr!("settings.data.monitorPace.both", seconds = seconds),
+            (true, false) => tr!("settings.data.monitorPace.desktop", seconds = seconds),
+            _ => tr!("settings.data.monitorPace.taskbar", seconds = seconds),
+        };
+        let p = self.palette;
+        div()
+            .mt(px(6.))
+            .flex()
+            .gap(px(6.))
+            .text_color(p.ink)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .mt(px(1.))
+                    .child(icon("InfoIcon", p.accent)),
+            )
+            .child(div().flex_1().min_w_0().child(text))
+            .into_any_element()
     }
 
     /// Settings polls once on arrival; only the rule statistics follow.
@@ -885,20 +963,22 @@ impl Desktop {
         let mut cards: Vec<AnyElement> = vec![];
         match section {
             "language" => {
-                cards.push(self.setting_text(
+                cards.push(self.setting(
                     "language",
-                    "GlobeIcon",
-                    "settings.language.title",
-                    "settings.language.desc",
+                    self.glyph("GlobeIcon"),
+                    label("settings.language.title"),
+                    None,
+                    None,
                     vec![self.language_select("settings-language", cx)],
                 ));
                 let themes = ["system", "light", "dark"]
                     .map(|value| (value, label(&format!("settings.theme.{value}"))));
-                cards.push(self.setting_text(
+                cards.push(self.setting(
                     "theme",
-                    "ThemeIcon",
-                    "settings.theme.title",
-                    "settings.theme.desc",
+                    self.glyph("ThemeIcon"),
+                    label("settings.theme.title"),
+                    None,
+                    None,
                     vec![self.setting_choices(
                         "theme",
                         text(settings, "theme"),
@@ -992,10 +1072,12 @@ impl Desktop {
                     "settings.holdOrder.desc",
                     vec![hold],
                 ));
+                cards.push(self.leak_setting(window, cx));
             }
             "startup" => {
                 let autostart = self.setting_toggle(
                     "autostart",
+                    "settings.startup.autostart.title",
                     boolean(settings, "autostart"),
                     "set_autostart",
                     "enabled",
@@ -1026,11 +1108,12 @@ impl Desktop {
                         this.open_dialog("shortcuts", json!({}), window, cx)
                     }))
                     .into_any_element();
-                cards.push(self.setting_text(
+                cards.push(self.setting(
                     "shortcuts",
-                    "KeyboardIcon",
-                    "settings.shortcuts.title",
-                    "settings.shortcuts.desc",
+                    self.glyph("KeyboardIcon"),
+                    label("settings.shortcuts.title"),
+                    None,
+                    None,
                     vec![view],
                 ));
             }
@@ -1782,13 +1865,12 @@ impl Desktop {
             vec![interval],
         ));
         // The tray's interval is on the Components page.
-        let select = self.background_select("settings", "minimized", cx);
-        cards.push(self.setting_text(
+        cards.push(self.background_card(
+            "settings",
             "minimizedInterval",
             "MinimizeIcon",
-            "settings.data.minimized.title",
-            "settings.data.minimized.desc",
-            vec![select],
+            "minimized",
+            cx,
         ));
         let minutes = self.release_hidden_minutes();
         let release = self.select(
@@ -1846,62 +1928,7 @@ impl Desktop {
             "settings.data.netUnit.desc",
             vec![units],
         ));
-        let history = boolean(settings, "history");
-        let toggle = self.setting_toggle(
-            "history",
-            history,
-            "set_history_enabled",
-            "enabled",
-            window,
-            cx,
-        );
-        cards.push(self.setting_text(
-            "history",
-            "HistoryIcon",
-            "settings.data.history.title",
-            if history {
-                "settings.data.history.on"
-            } else {
-                "settings.data.history.off"
-            },
-            vec![toggle],
-        ));
-        let usage = self.data.get("historyUsage").cloned();
-        let bytes = usage.as_ref().map(|u| number(u, "bytes")).unwrap_or(0.);
-        let usage_text = match &usage {
-            None => label("settings.data.history.counting"),
-            Some(_) if bytes <= 0. => label("settings.data.history.empty"),
-            Some(usage) => {
-                let size = theme::bytes(bytes, false);
-                match usage["first"].as_i64().filter(|t| *t > 0) {
-                    Some(first) => tr!(
-                        "settings.data.history.sizeSince",
-                        size = size,
-                        date = short_time(first)
-                    ),
-                    None => tr!("settings.data.history.size", size = size),
-                }
-            }
-        };
-        let clearing = self.ui.busy.contains("clearHistory");
-        let clear = self
-            .btn(
-                "clear-history",
-                label("settings.data.history.clear"),
-                Some("TrashIcon"),
-                Tone::Plain,
-            )
-            .inert(clearing || bytes <= 0.)
-            .on_click(cx.listener(|this, _, window, cx| this.clear_history(window, cx)))
-            .into_any_element();
-        cards.push(self.setting(
-            "savedHistory",
-            self.glyph("StorageIcon"),
-            label("settings.data.history.saved"),
-            Some(usage_text.into_any_element()),
-            None,
-            vec![clear],
-        ));
+        self.history_setting_cards(settings, cards, window, cx);
     }
 
     pub(in crate::frontend) fn clear_history(
@@ -1966,13 +1993,13 @@ impl Desktop {
             .items_center()
             .gap(px(6.))
             .child(
-                // `width: 4.5em; padding: 5px 7px` with a 1 px stroke; its
-                // height is the 1.4 line height of the text plus those.
+                // Three digits scale with the font. The spin button, frame
+                // padding and borders, and the editor's caret margin are fixed.
                 div()
                     .id(SharedString::from(format!("setting-{id}-input")))
                     .group(group.clone())
                     .relative()
-                    .w(theme::font(13. * 4.5))
+                    .w(theme::font(13. * 2.25) + px(15. + 16. + 10.))
                     .h(theme::font(13.) * 1.4 + px(12.))
                     .px(px(7.))
                     .flex()
@@ -2009,7 +2036,10 @@ impl Desktop {
                                     .appearance(false)
                                     .px_0()
                                     .py_0()
-                                    .text_size(theme::font(13.)),
+                                    .text_size(theme::font(13.))
+                                    // Named, for assistive technology, by
+                                    // the setting it changes.
+                                    .aria_label(label(title)),
                             ),
                     )
                     .child(self.spin_button(setting, id, &group, focused || held, window, cx))
@@ -2851,6 +2881,7 @@ impl Desktop {
             .into_any_element();
         let whats_new = self.setting_toggle(
             "whatsNew",
+            "settings.update.whatsNew.title",
             boolean(settings, "whatsNew"),
             "set_whats_new",
             "enabled",
@@ -3769,6 +3800,8 @@ impl Desktop {
             }
             "clear_history" => {
                 self.ui.busy.remove("clearHistory");
+                // What the programs seen were goes with the records.
+                self.history_forget_kinds();
                 let generation = self
                     .data
                     .get("watchGeneration")
@@ -3785,6 +3818,19 @@ impl Desktop {
                     2500,
                 );
                 self.data.remove("historyUsage");
+                self.request("history_usage", json!({}), Some("historyUsage"), window, cx);
+            }
+            // What a day takes and what is kept follow the options.
+            "set_history_options" => {
+                self.request("history_usage", json!({}), Some("historyUsage"), window, cx);
+            }
+            "history_move" | "history_reset_dir" => {
+                self.ui.busy.remove("historyMove");
+                self.data.remove("historyMoveTo");
+                self.notify_toast(
+                    ToastKind::Success,
+                    label("settings.data.history.place.moved"),
+                );
                 self.request("history_usage", json!({}), Some("historyUsage"), window, cx);
             }
             "set_hotkey" => {
@@ -3955,9 +4001,16 @@ impl Desktop {
             "set_background_intervals" => {
                 self.notify_toast(ToastKind::Error, wrapped("settings.data.background.error"))
             }
-            "set_history_enabled" => {
+            "set_history_enabled" | "set_history_options" => {
                 self.notify_toast(ToastKind::Error, wrapped("settings.data.history.error"))
             }
+            // The host's message says what to check.
+            "history_move" | "history_reset_dir" => {
+                self.ui.busy.remove("historyMove");
+                self.notify_toast(ToastKind::Error, message.to_owned());
+                self.request("history_usage", json!({}), Some("historyUsage"), window, cx);
+            }
+            "history_open_dir" => self.notify_toast(ToastKind::Error, message.to_owned()),
             "set_rules" => self.notify_toast(ToastKind::Error, wrapped("settings.rules.error")),
             "set_update_settings" | "set_whats_new" => {
                 self.notify_toast(ToastKind::Error, wrapped("settings.update.error"))
@@ -3975,6 +4028,25 @@ impl Desktop {
     // ---- Keyboard shortcuts sheet ------------------------
 
     /// Keys as keycaps: chords split by " / ", keys by "+".
+    /// A pointer gesture in words, in a quieter frame than a key's.
+    fn shortcut_gesture(&self, gesture: &str) -> AnyElement {
+        let p = self.palette;
+        div()
+            .flex_shrink_0()
+            .h(px(25.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(p.stroke)
+            .rounded(px(5.))
+            .text_size(theme::font(11.))
+            .text_color(p.ink)
+            .whitespace_nowrap()
+            .child(gesture.to_owned())
+            .into_any_element()
+    }
+
     pub(in crate::frontend) fn shortcut_keys(&self, value: &str) -> AnyElement {
         let p = self.palette;
         let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
@@ -3988,7 +4060,13 @@ impl Desktop {
                 );
             }
             let mut keys = div().flex().items_center().gap(px(4.)).whitespace_nowrap();
-            for (part, key) in chord.split('+').enumerate() {
+            // The plus key alone is a key, not a chord of two empty ones.
+            let parts = if chord == "+" {
+                vec![chord]
+            } else {
+                chord.split('+').collect::<Vec<_>>()
+            };
+            for (part, key) in parts.into_iter().enumerate() {
                 if part > 0 {
                     keys = keys.child(
                         div()
@@ -4168,7 +4246,7 @@ impl Desktop {
                     .child(self.shortcut_keys(&format!("Ctrl+{}", index + 1)))
             }));
         type Group<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str)]);
-        let groups: [Group; 2] = [
+        let groups: [Group; 3] = [
             (
                 "table",
                 "ProcessesIcon",
@@ -4179,9 +4257,16 @@ impl Desktop {
                     ("Home / End", "settings.shortcuts.ends"),
                     ("← / →", "settings.shortcuts.expand"),
                     ("Enter", "settings.shortcuts.details"),
+                    ("Ctrl+C", "settings.shortcuts.copyName"),
+                    ("Ctrl+Shift+C", "settings.shortcuts.copyDetails"),
                     ("Delete", "settings.shortcuts.endTable"),
                     ("Shift+Delete", "settings.shortcuts.endDirect"),
                     ("Esc", "settings.shortcuts.clear"),
+                    // A gesture, named in words.
+                    (
+                        "settings.shortcuts.mouse.shiftWheel",
+                        "settings.shortcuts.scrollSideways",
+                    ),
                 ],
             ),
             (
@@ -4197,6 +4282,62 @@ impl Desktop {
                     ("+ / −", "settings.shortcuts.zoom"),
                     ("0", "settings.shortcuts.zoomReset"),
                     ("Esc", "settings.shortcuts.clearCursor"),
+                ],
+            ),
+            // Gestures, named in words rather than drawn as keys.
+            (
+                "historyMouse",
+                "PointerIcon",
+                "settings.shortcuts.historyMouse",
+                &[
+                    (
+                        "settings.shortcuts.mouse.hover",
+                        "settings.shortcuts.mouse.hoverText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.click",
+                        "settings.shortcuts.mouse.clickText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.drag",
+                        "settings.shortcuts.mouse.dragText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.right",
+                        "settings.shortcuts.mouse.rightText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.pin",
+                        "settings.shortcuts.mouse.pinText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.wheel",
+                        "settings.shortcuts.mouse.wheelText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.shiftWheel",
+                        "settings.shortcuts.mouse.shiftWheelText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.double",
+                        "settings.shortcuts.mouse.doubleText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.navigator",
+                        "settings.shortcuts.mouse.navigatorText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.divider",
+                        "settings.shortcuts.mouse.dividerText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.grip",
+                        "settings.shortcuts.mouse.gripText",
+                    ),
+                    (
+                        "settings.shortcuts.mouse.reading",
+                        "settings.shortcuts.mouse.readingText",
+                    ),
                 ],
             ),
         ];
@@ -4292,7 +4433,11 @@ impl Desktop {
                                                 .text_color(p.muted)
                                                 .child(label(text_key)),
                                         )
-                                        .child(self.shortcut_keys(keys))
+                                        .child(if keys.starts_with("settings.") {
+                                            self.shortcut_gesture(&label(keys))
+                                        } else {
+                                            self.shortcut_keys(keys)
+                                        })
                                 })),
                         )
                     }),

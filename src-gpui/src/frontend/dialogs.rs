@@ -1,6 +1,8 @@
 use super::*;
 mod file_lock;
+mod presence;
 mod process_actions;
+mod service_actions;
 use gpui_kit::base::ElementExt;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
@@ -28,7 +30,6 @@ mod frame_tests {
             to: px(0.),
             since: now,
             clip: None,
-            body_height: px(0.),
             scroll: ScrollHandle::new(),
         }
     }
@@ -140,7 +141,6 @@ pub(super) struct DialogFrame {
     /// height leaves it. `None` once its content is taller than the dialog
     /// can grow and the height has settled; then the body scrolls.
     clip: Option<Pixels>,
-    body_height: Pixels,
     scroll: ScrollHandle,
 }
 
@@ -203,6 +203,10 @@ impl DialogFrame {
         (height, cap)
     }
 }
+
+/// How much taller than its room a dialog's content may be and still be
+/// drawn without a scrollbar: less than any body's bottom padding.
+const OVERFLOW_TOLERANCE: f32 = 4.;
 
 /// Dialogs that open over whatever is open.
 const STACKING: [&str; 9] = [
@@ -579,6 +583,7 @@ impl Desktop {
                 None,
             ),
             "shortcuts" => (label("settings.shortcuts.title"), String::new(), None),
+            "historyRange" => (label("history.picker.title"), String::new(), None),
             "onboarding" => (
                 label("settings.about.onboarding.title"),
                 String::new(),
@@ -778,8 +783,8 @@ impl Desktop {
         self.begin_leaving(false, window, cx);
     }
 
-    /// The top dialog fades out (`dialog-out`, with the scrim when it is the
-    /// last one) and closes when that ends; at once under reduced motion.
+    /// The top dialog recedes and fades out (`presence`, with the scrim when
+    /// it is the last one) and closes when that ends; at once under reduced motion.
     fn begin_leaving(&mut self, cancelled: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.modal.as_ref().map(|m| m.id) else {
             if self.modal.is_none() {
@@ -821,8 +826,9 @@ impl Desktop {
             self.after_close(closed, cancelled, window, cx);
         }
         if self.modal.is_none() {
+            // A scrim still fading out finishes on its own clock: it runs
+            // longer than the dialog's fade.
             self.scrim.shown.set(None);
-            self.scrim.leaving.set(None);
             self.notify_scrim(cx);
             self.focus.focus(window, cx);
         }
@@ -845,8 +851,11 @@ impl Desktop {
         }
         window.close_all_dialogs(cx);
         let closed = self.modal.take().into_iter().chain(self.ui.below.drain(..));
-        for id in closed.map(|modal| modal.id).collect::<Vec<_>>() {
-            self.forget_dialog(id);
+        for modal in closed.collect::<Vec<_>>() {
+            if modal.kind == "historyRange" {
+                self.history_picker_closed();
+            }
+            self.forget_dialog(modal.id);
         }
     }
 
@@ -886,6 +895,9 @@ impl Desktop {
         }
         if matches!(closed.kind.as_str(), "task" | "columns") {
             self.ui.input_subscriptions.clear();
+        }
+        if closed.kind == "historyRange" {
+            self.history_picker_closed();
         }
         if !self
             .modal
@@ -955,19 +967,13 @@ impl Desktop {
     /// easing toward, never makes it scroll.
     pub(in crate::frontend) fn dialog_body(&self, id: u64) -> Stateful<Div> {
         let parts = self.ui.dialog_parts.clone();
-        let (height, clipping, scroll) = self
+        let (clip, scrollable, scroll) = self
             .ui
             .dialog_frames
             .borrow()
             .get(&id)
-            .map(|frame| {
-                (
-                    Some(frame.clip.unwrap_or(frame.body_height)),
-                    frame.clip.is_some(),
-                    frame.scroll.clone(),
-                )
-            })
-            .unwrap_or((None, true, ScrollHandle::new()));
+            .map(|frame| (frame.clip, frame.clip.is_none(), frame.scroll.clone()))
+            .unwrap_or_else(|| (None, false, ScrollHandle::new()));
         let measured_scroll = scroll.clone();
         div()
             .on_children_prepainted(move |_, window, cx| {
@@ -985,16 +991,19 @@ impl Desktop {
             .id(("dialog-body", id))
             .relative()
             .track_scroll(&scroll)
-            .when_some(height, |d, height| d.h(height))
-            .when(clipping, |d| d.overflow_hidden())
-            .when(!clipping, |d| d.overflow_y_scroll())
-            // Bound the inner native viewport so the component's outer scroller
-            // stays at rest and wheel notches use the shared GPUI glide.
-            .child(scrollbar::scrollbar(
-                format!("dialog-{id}-scrollbar"),
-                &scroll,
-                self.palette.dark,
-            ))
+            .when_some(clip, |d, height| d.h(height))
+            // Fill the actual space between the snapped border and footer.
+            // An independently rounded height can overflow the component's
+            // outer scroller by one device pixel, which captures the wheel.
+            .when(scrollable, |d| d.absolute().inset_0().overflow_y_scroll())
+            .when(!scrollable, |d| d.overflow_hidden())
+            // The measurement above skips the first child in both cases.
+            .child(if scrollable {
+                scrollbar::scrollbar(format!("dialog-{id}-scrollbar"), &scroll, self.palette.dark)
+                    .into_any_element()
+            } else {
+                div().absolute().size_0().into_any_element()
+            })
     }
 
     /// Drops what was kept for a dialog that closed.
@@ -1019,11 +1028,11 @@ impl Desktop {
             "settled":frame.is_some_and(|frame| frame.height(Instant::now(), theme::motion_duration()) == frame.to),
             "centered":frame.is_some_and(|frame| (f32::from(frame.top+frame.to/2.-frame.viewport/2.)).abs()<0.5),
             "top":frame.map(|frame|f32::from(frame.top)),"height":frame.map(|frame|f32::from(frame.to)),
-            "scrollY":frame.map(|frame|f32::from(-frame.scroll.offset().y))})
+            "scrollY":frame.map(|frame|f32::from(frame.scroll.offset().y).abs())})
     }
 
-    /// The common dialog surface: width, colours, no close button, Fluent
-    /// fade. It opens centred in the window, as the interface's scrim centred
+    /// The common dialog surface: width, colours, no close button, and its
+    /// entrance and exit (`presence`). It opens centred in the window, as the interface's scrim centred
     /// it. Release readers retain their centre during height transitions;
     /// forms retain their top edge. Bodies scroll at the available-height limit.
     fn surface(
@@ -1079,7 +1088,6 @@ impl Desktop {
                     to: natural,
                     since: now,
                     clip: None,
-                    body_height: px(0.),
                     scroll: ScrollHandle::new(),
                 });
                 let centered = self
@@ -1102,10 +1110,11 @@ impl Desktop {
                     window.request_animation_frame();
                 }
                 // 1 px short of the body's room, so that rounding to device
-                // pixels never leaves a fraction of a pixel to scroll.
-                frame.clip =
-                    (easing || natural <= cap).then(|| (height - footer - px(3.)).max(px(0.)));
-                frame.body_height = (height - footer - px(2.)).max(px(0.));
+                // pixels never leaves a fraction of a pixel to scroll. Content a
+                // few pixels taller than the room fits too: what is cut off is
+                // the body's empty bottom padding, not worth a scrollbar.
+                frame.clip = (easing || natural <= cap + px(OVERFLOW_TOLERANCE))
+                    .then(|| (height - footer - px(3.)).max(px(0.)));
                 if let Some(ms) = scrollbar::trace_ms() {
                     println!(
                         "{}",
@@ -1116,10 +1125,13 @@ impl Desktop {
                 }
                 let top = frame.top;
                 drop(frames);
+                // The component sets the surface's opacity and shadow itself;
+                // a transform in the style scales and fades all of it.
+                let pose = self.dialog_pose(id, window, cx);
                 dialog
                     .margin_top(top - shift)
                     .h(height)
-                    .opacity(self.dialog_opacity(id, window, cx))
+                    .when_some(pose, |dialog, pose| dialog.paint_transform(pose))
             }
             None => dialog.opacity(0.),
         };
@@ -1168,10 +1180,15 @@ impl Desktop {
             })
     }
 
-    /// A shown dialog's opacity: in over 250 ms from its first visible frame
-    /// (`dialog-in`, decelerating), out over 167 ms while it leaves
-    /// (`dialog-out`, accelerating). The interface's slight scale is left out.
-    fn dialog_opacity(&self, id: u64, window: &Window, cx: &mut Context<Self>) -> f32 {
+    /// A shown dialog's pose (`presence::pose`): it grows in from its first
+    /// visible frame and recedes while it leaves, closing once faded out.
+    /// `None` at rest and under reduced motion: no transform, whole pixels.
+    fn dialog_pose(
+        &self,
+        id: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<LiveTransformValue> {
         let shown = *self
             .ui
             .dialog_shown
@@ -1184,28 +1201,22 @@ impl Desktop {
             self.notify_scrim(cx);
         }
         if cx.reduce_motion() {
-            return 1.;
+            return None;
         }
-        let entering = (shown.elapsed().as_secs_f32() / 0.25).min(1.);
-        let mut opacity = theme::ease_out(entering);
-        let mut animating = entering < 1.;
-        if let Some((leaving, started, _)) = self.ui.dialog_leaving
-            && leaving == id
-        {
-            let t = (started.elapsed().as_secs_f32() / 0.167).min(1.);
-            opacity *= 1. - theme::ease_in(t);
-            if t >= 1. {
-                cx.defer_in(window, move |this, window, cx| {
-                    this.finish_leaving(id, window, cx)
-                });
-            } else {
-                animating = true;
-            }
-        }
-        if animating {
+        let left = self
+            .ui
+            .dialog_leaving
+            .filter(|(leaving, ..)| *leaving == id)
+            .map(|(_, started, _)| started.elapsed());
+        let pose = presence::pose(shown.elapsed(), left);
+        if pose.gone {
+            cx.defer_in(window, move |this, window, cx| {
+                this.finish_leaving(id, window, cx)
+            });
+        } else if !pose.settled {
             window.request_animation_frame();
         }
-        opacity
+        (!pose.settled).then_some(pose.value)
     }
 
     /// A dialog's title in the display face (`.dialog-title`).
@@ -1302,6 +1313,11 @@ impl Desktop {
             "note" => {
                 let dialog = self.surface(dialog, id, 420., 16., window, cx);
                 self.note_dialog(dialog, &modal, window, cx)
+            }
+            "historyRange" => {
+                let width = self.history_range_width();
+                let dialog = self.surface(dialog, id, width, 16., window, cx);
+                self.history_range_dialog(dialog, &modal, window, cx)
             }
             "visibility" => {
                 let dialog = self.surface(dialog, id, 580., 16., window, cx);
@@ -1436,6 +1452,7 @@ impl Desktop {
             "note" => self.confirm_dialog(window, cx),
             "onboarding" => self.onboarding_next(window, cx),
             "license" | "notices" | "shortcuts" | "whatsnew" => self.close_overlay(window, cx),
+            "historyRange" => self.history_picker_apply(window, cx),
             "filelock" | "update" => {}
             _ => self.act(Action::Confirm, window, cx),
         }
@@ -1733,6 +1750,7 @@ impl Desktop {
             "pick_path" => {
                 self.ui.busy.remove("pick");
                 let Some(path) = value.as_str() else {
+                    self.ui.busy.remove("pickHistory");
                     return;
                 };
                 match self.modal.as_ref().map(|m| m.kind.as_str()) {
@@ -1749,6 +1767,11 @@ impl Desktop {
                         }
                     }
                     Some("filelock") => self.search_lockers(vec![path.to_owned()], window, cx),
+                    // A folder for the history, from its settings card.
+                    None if self.ui.busy.remove("pickHistory") => {
+                        self.data.insert("historyMoveTo".into(), json!(path));
+                        self.data.insert("historyMoveRecords".into(), json!(true));
+                    }
                     _ => {}
                 }
             }
@@ -1788,6 +1811,10 @@ impl Desktop {
             | "set_service_start_type"
             | "set_startup_enabled"
             | "close_connection" => self.poll_page(window, cx),
+            "set_service_start_type_registry" => {
+                self.notify_toast(ToastKind::Success, label("services.packaged.done"));
+                self.poll_page(window, cx);
+            }
             _ => self.settings_completed(command, value, window, cx),
         }
     }
@@ -1821,6 +1848,7 @@ impl Desktop {
             }
             "pick_path" => {
                 self.ui.busy.remove("pick");
+                self.ui.busy.remove("pickHistory");
                 self.notify_toast(ToastKind::Error, message);
             }
             "find_lockers" => {
@@ -1845,6 +1873,16 @@ impl Desktop {
             "kill_process" if boolean(args, "locker") => {
                 self.ui.errors.remove("lockerEnd");
                 self.notify_toast(ToastKind::Error, message);
+            }
+            // A packaged service's security descriptor keeps the SCM from
+            // changing it even for administrators: offer its registry value,
+            // which takes the same rights. The host says whether it acted with
+            // them (`accessDeniedPrivileged`); without them the usual guidance shows.
+            "set_service_start_type"
+                if boolean(args, "registryStartTypeAllowed")
+                    && text(error, "kind") == "accessDeniedPrivileged" =>
+            {
+                self.offer_registry_start_type(args, window, cx);
             }
             _ => {
                 if !self.settings_failed(command, args, error, &message, window, cx) {
@@ -2316,7 +2354,8 @@ pub(super) struct ScrimState {
 /// The dim behind dialogs, a layer of its own over the desktop and its chart
 /// layer, so the moving curves dim with everything else; the caption buttons
 /// stay above it. It fades in over 167 ms when the first dialog shows and out
-/// (accelerating) with the last.
+/// over 167 ms, both linearly, once the last starts leaving; the fade out
+/// outlasts the dialog's own.
 pub(super) struct Scrim {
     pub state: Rc<ScrimState>,
     /// The part behind the caption buttons, drawn by the title row under
@@ -2336,7 +2375,7 @@ impl Render for Scrim {
             }
         };
         let level = match (self.state.shown.get(), self.state.leaving.get()) {
-            (_, Some(leaving)) => 1. - theme::ease_in(progress(leaving)),
+            (_, Some(leaving)) => 1. - progress(leaving),
             (Some(shown), None) => progress(shown),
             (None, None) => 0.,
         };
@@ -2368,14 +2407,9 @@ impl Render for Scrim {
             .absolute()
             .inset_0()
             .when(level > 0., |d| {
-                d.child(dim().top_0().left_0().right(captions_width()).h(toolbar))
+                d.child(dim().top_0().left_0().right(caption::width()).h(toolbar))
                     .child(dim().top(toolbar).left_0().right_0().bottom_0())
             })
             .into_any_element()
     }
-}
-
-/// The width of the three caption buttons at the end of the title row.
-pub(super) fn captions_width() -> Pixels {
-    gpui_kit::component::TITLE_BAR_HEIGHT * 3.
 }

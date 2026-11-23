@@ -1,7 +1,8 @@
-//! Opt-in observation of future instances, with one validated handle per live instance.
+//! Opt-in process observation, with one validated handle per live instance.
 use super::{
-    SAMPLE_MS, WatchError, WatchMode, WatchPoint, WatchRun, WatchState, WatchView,
+    SAMPLE_MS, WatchError, WatchPoint, WatchRun, WatchState, WatchView,
     identity::Instance,
+    series::RecentRun,
     store::{self, Metadata, Store},
 };
 use crate::{Snapshot, util::OwnedHandle};
@@ -23,6 +24,7 @@ const PREVIEW_RUNS: usize = 256;
 pub(super) struct ProgramWatch {
     store: Store,
     handles: HashMap<Key, OwnedHandle>,
+    recent: HashMap<Key, RecentRun>,
     seen: HashSet<Key>,
     unconfirmed: HashMap<Key, Instant>,
     selected: Option<Key>,
@@ -37,12 +39,14 @@ pub(super) struct ProgramWatch {
 impl ProgramWatch {
     pub fn start(dir: &Path, pid: u32, created: i64, name: String) -> Result<Self, WatchError> {
         let instance = Instance::open(pid, created)?;
-        let program = instance.program()?;
+        // Image identity is optional: without it, only this live instance is observed.
+        let program = instance.program().ok();
         std::fs::create_dir_all(dir).map_err(|_| WatchError::Storage)?;
         let store = Store::create(&dir.join(store::FILE_NAME), Metadata { program, name })?;
         Ok(Self {
             store,
             handles: HashMap::from([((pid, created), instance.into_handle())]),
+            recent: HashMap::new(),
             seen: HashSet::from([(pid, created)]),
             unconfirmed: HashMap::new(),
             selected: Some((pid, created)),
@@ -55,17 +59,54 @@ impl ProgramWatch {
         })
     }
 
+    /// Keep process handles and selection across a history-folder transaction.
+    /// Only the storage handle has to close for a cross-volume transfer.
+    pub(super) fn suspend(self) -> impl FnOnce(&Path) -> Result<Self, WatchError> {
+        let Self {
+            store,
+            handles,
+            recent,
+            seen,
+            unconfirmed,
+            selected,
+            before,
+            run_offset,
+            active,
+            state,
+            last,
+            last_ts,
+        } = self;
+        drop(store);
+        move |dir| {
+            Ok(Self {
+                store: Store::open(&dir.join(store::FILE_NAME), super::now_ms())?,
+                handles,
+                recent,
+                seen,
+                unconfirmed,
+                selected,
+                before,
+                run_offset,
+                active,
+                state,
+                last,
+                last_ts,
+            })
+        }
+    }
     pub fn open(dir: &Path) -> Result<Self, WatchError> {
         let store = Store::open(&dir.join(store::FILE_NAME), super::now_ms())?;
         // Restarting Argus never silently resumes an observation.
         let state = match store.entries.back().map(|e| e.point.state) {
             Some(WatchState::Stopped) => WatchState::Stopped,
             Some(WatchState::Limit) => WatchState::Limit,
+            Some(WatchState::Exited) if store.meta.program.is_none() => WatchState::Exited,
             _ => WatchState::Interrupted,
         };
         Ok(Self {
             store,
             handles: HashMap::new(),
+            recent: HashMap::new(),
             seen: HashSet::new(),
             unconfirmed: HashMap::new(),
             selected: None,
@@ -113,17 +154,18 @@ impl ProgramWatch {
         self.run_offset = offset.min(store::CAPACITY - 1);
     }
 
+    #[cfg(test)]
+    pub(super) fn clear_sample_timer_for_test(&mut self) {
+        self.last = None;
+    }
+
     fn terminal(&mut self, key: Key, state: WatchState, ts: i64) -> Result<(), WatchError> {
-        self.store.push(
-            key.0,
-            key.1,
-            WatchPoint {
-                ts,
-                memory: None,
-                commit: None,
-                state,
-            },
-        )
+        let point = WatchPoint::marker(ts, state);
+        self.store.push(key.0, key.1, point.clone())?;
+        if let Some(recent) = self.recent.get_mut(&key) {
+            recent.push(point, 0);
+        }
+        Ok(())
     }
 
     pub fn stop(&mut self, state: WatchState, ts: i64) -> Result<(), WatchError> {
@@ -145,11 +187,21 @@ impl ProgramWatch {
         self.store.flush()
     }
 
-    pub fn record(&mut self, snapshot: &Snapshot) -> Result<(), WatchError> {
+    #[cfg(test)]
+    fn record(&mut self, snapshot: &Snapshot) -> Result<(), WatchError> {
+        self.record_at_interval(snapshot, Duration::from_secs(1))
+    }
+
+    pub fn record_at_interval(
+        &mut self,
+        snapshot: &Snapshot,
+        cadence: Duration,
+    ) -> Result<(), WatchError> {
+        self.recent.retain(|_, run| run.prune(snapshot.timestamp));
         if !self.active {
             return self.store.prune(snapshot.timestamp);
         }
-        let result = self.sample(snapshot);
+        let result = self.sample(snapshot, cadence);
         if result.is_err() {
             self.handles.clear();
             self.unconfirmed.clear();
@@ -159,59 +211,58 @@ impl ProgramWatch {
         result
     }
 
-    fn sample(&mut self, snapshot: &Snapshot) -> Result<(), WatchError> {
+    fn sample(&mut self, snapshot: &Snapshot, cadence: Duration) -> Result<(), WatchError> {
         if self.last_ts.is_some_and(|ts| snapshot.timestamp < ts) {
             return self.stop(WatchState::Interrupted, self.last_ts.unwrap());
         }
-        let present: HashSet<_> = snapshot
-            .processes
-            .iter()
-            .map(|row| (row.pid, row.create_time))
-            .collect();
-        self.seen
-            .retain(|key| present.contains(key) || self.handles.contains_key(key));
-        self.unconfirmed.retain(|key, attempted| {
-            if !present.contains(key) {
-                return false;
+        if let Some(target_program) = self.store.meta.program.clone() {
+            let present: HashSet<_> = snapshot
+                .processes
+                .iter()
+                .map(|row| (row.pid, row.create_time))
+                .collect();
+            self.seen
+                .retain(|key| present.contains(key) || self.handles.contains_key(key));
+            self.unconfirmed.retain(|key, attempted| {
+                if !present.contains(key) {
+                    return false;
+                }
+                if attempted.elapsed() >= Duration::from_secs(60) {
+                    self.seen.remove(key);
+                    return false;
+                }
+                true
+            });
+            let basename = target_program
+                .display_path
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or("");
+            for row in &snapshot.processes {
+                let key = (row.pid, row.create_time);
+                // The basename only reduces queries. Final identity always comes from the validated handle.
+                if row.create_time <= 0
+                    || !row.name.eq_ignore_ascii_case(basename)
+                    || !self.seen.insert(key)
+                {
+                    continue;
+                }
+                let Ok(instance) = Instance::open(row.pid, row.create_time) else {
+                    self.unconfirmed.insert(key, Instant::now());
+                    continue;
+                };
+                let Ok(identity) = instance.program() else {
+                    self.unconfirmed.insert(key, Instant::now());
+                    continue;
+                };
+                if !target_program.same_program(&identity) {
+                    continue;
+                }
+                if self.handles.len() == MAX_ACTIVE {
+                    return self.stop(WatchState::Limit, snapshot.timestamp);
+                }
+                self.handles.insert(key, instance.into_handle());
             }
-            if attempted.elapsed() >= Duration::from_secs(60) {
-                self.seen.remove(key);
-                return false;
-            }
-            true
-        });
-        let basename = self
-            .store
-            .meta
-            .program
-            .display_path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or("");
-        for row in &snapshot.processes {
-            let key = (row.pid, row.create_time);
-            // The basename only reduces queries. Final identity always comes from the validated handle.
-            if row.create_time <= 0
-                || !row.name.eq_ignore_ascii_case(basename)
-                || !self.seen.insert(key)
-            {
-                continue;
-            }
-            let Ok(instance) = Instance::open(row.pid, row.create_time) else {
-                self.unconfirmed.insert(key, Instant::now());
-                continue;
-            };
-            let Ok(identity) = instance.program() else {
-                self.unconfirmed.insert(key, Instant::now());
-                continue;
-            };
-            if !self.store.meta.program.same_program(&identity) {
-                continue;
-            }
-            if self.handles.len() == MAX_ACTIVE {
-                return self.stop(WatchState::Limit, snapshot.timestamp);
-            }
-            self.handles.insert(key, instance.into_handle());
         }
         let terminal: Vec<_> = self
             .handles
@@ -224,18 +275,25 @@ impl ProgramWatch {
                 },
             )
             .collect();
+        let mut ended_state = None;
         for (key, state) in terminal {
             self.terminal(key, state, snapshot.timestamp)?;
             self.handles.remove(&key);
+            ended_state = Some(state);
         }
-        if self
+        if self.store.meta.program.is_none() && self.handles.is_empty() {
+            self.active = false;
+            self.state = ended_state.unwrap_or(WatchState::Exited);
+            return self.store.flush();
+        }
+        let save = self
             .last
-            .is_some_and(|last| last.elapsed() < Duration::from_millis(SAMPLE_MS as u64))
-        {
-            return Ok(());
-        }
+            .is_none_or(|last| last.elapsed() >= Duration::from_millis(SAMPLE_MS as u64));
+        let expected = cadence.as_millis().clamp(1, 60_000) as i64;
+        let elapsed = self.last_ts.map(|ts| snapshot.timestamp.saturating_sub(ts));
+        let interrupted = elapsed.is_some_and(|dt| dt > (expected + SAMPLE_MS).max(2 * SAMPLE_MS));
         if let Some(previous) = self.last_ts
-            && snapshot.timestamp.saturating_sub(previous) > SAMPLE_MS * 2
+            && interrupted
         {
             // New launches start at their first sample; an earlier gap belongs to older runs.
             let keys: Vec<_> = self
@@ -245,42 +303,90 @@ impl ProgramWatch {
                 .copied()
                 .collect();
             // Terminal records may already have this snapshot's timestamp; keep sequence time monotonic.
-            let gap_ts = self.store.entries.back().map_or(previous + SAMPLE_MS, |e| {
-                e.point.ts.max(previous + SAMPLE_MS)
-            });
+            let gap_start = previous.saturating_add(expected);
+            let gap_ts = self
+                .store
+                .entries
+                .back()
+                .map_or(gap_start, |e| e.point.ts.max(gap_start));
             for key in keys {
                 self.terminal(key, WatchState::Gap, gap_ts)?;
             }
         }
+        let span = elapsed
+            .filter(|dt| *dt > 0 && !interrupted)
+            .unwrap_or(expected);
         let rows: HashMap<_, _> = snapshot
             .processes
             .iter()
+            .filter(|p| self.handles.contains_key(&(p.pid, p.create_time)))
             .map(|p| ((p.pid, p.create_time), p))
             .collect();
+        let net_enabled = snapshot.process_network;
         for key in self.handles.keys() {
             let row = rows
                 .get(key)
                 .filter(|p| !p.stale && !p.sample_reused && !p.counters_pending);
-            self.store.push(
-                key.0,
-                key.1,
-                WatchPoint {
+            let point = match row {
+                Some(p) => WatchPoint {
                     ts: snapshot.timestamp,
-                    memory: row.map(|p| p.private_ws),
-                    commit: row.map(|p| p.commit),
-                    state: if row.is_some() {
-                        WatchState::Recording
-                    } else {
-                        WatchState::Gap
-                    },
+                    memory: Some(p.private_ws),
+                    commit: Some(p.commit),
+                    working_set: Some(p.working_set),
+                    cpu: p.cpu.is_finite().then_some(p.cpu.max(0.)),
+                    gpu: p.gpu.is_finite().then_some(p.gpu.max(0.)),
+                    gpu_memory: p.gpu_dedicated,
+                    disk_read: p.disk_read,
+                    disk_write: p.disk_write,
+                    io_read: Some(p.io_read),
+                    io_write: Some(p.io_write),
+                    net_received: net_enabled.then_some(p.net_received),
+                    net_sent: net_enabled.then_some(p.net_sent),
+                    threads: Some(p.threads),
+                    handles: Some(p.handles),
+                    state: WatchState::Recording,
                 },
-            )?;
+                None => WatchPoint::marker(snapshot.timestamp, WatchState::Gap),
+            };
+            // The first sample of a short-lived instance also survives a restart.
+            if save || !self.recent.contains_key(key) {
+                self.store.push(key.0, key.1, point.clone())?;
+            }
+            self.recent.entry(*key).or_default().push(point, span);
         }
-        self.store.prune(snapshot.timestamp)?;
-        self.store.flush()?;
-        self.last = Some(Instant::now());
+        if save {
+            self.store.prune(snapshot.timestamp)?;
+            self.store.flush()?;
+            self.last = Some(Instant::now());
+        }
         self.last_ts = Some(snapshot.timestamp);
         Ok(())
+    }
+
+    /// One run's readings over a window (`SeriesQuery`), from its records.
+    pub fn series(&self, query: &super::SeriesQuery) -> crate::history::HistorySeries {
+        let key = (query.pid, query.create_time);
+        super::series::series(
+            |from| {
+                let entries = &self.store.entries;
+                let at = entries.partition_point(|e| e.point.ts < from);
+                // Two earlier readings give both the cadence at the left edge
+                // and the start of a gap crossing it. Markers between them stay.
+                let start = entries
+                    .range(..at)
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, e)| (e.pid, e.created) == key && e.point.has_any_metric())
+                    .nth(1)
+                    .map_or(0, |(i, _)| i);
+                entries
+                    .range(start..)
+                    .filter(move |e| (e.pid, e.created) == key)
+                    .map(|e| &e.point)
+            },
+            self.recent.get(&key),
+            query,
+        )
     }
 
     pub fn view(&self) -> WatchView {
@@ -305,7 +411,7 @@ impl ProgramWatch {
             };
         }
         for key in self.handles.keys() {
-            runs.entry(*key).or_insert(WatchRun {
+            let run = runs.entry(*key).or_insert(WatchRun {
                 pid: key.0,
                 create_time: key.1,
                 first_ts: 0,
@@ -313,6 +419,10 @@ impl ProgramWatch {
                 points: 0,
                 state: WatchState::Recording,
             });
+            if let Some(latest) = self.recent.get(key).and_then(RecentRun::latest) {
+                run.last_ts = latest.ts;
+                run.state = latest.state;
+            }
         }
         let key = self
             .selected
@@ -347,15 +457,10 @@ impl ProgramWatch {
         let mut points: Vec<WatchPoint> = Vec::new();
         for entry in entries {
             if let Some(previous) = points.last()
-                && entry.point.ts.saturating_sub(previous.ts) > SAMPLE_MS * 2
+                && entry.point.ts.saturating_sub(previous.ts) > super::series::MAX_SPACING_MS
                 && previous.memory.is_some()
             {
-                points.push(WatchPoint {
-                    ts: previous.ts + SAMPLE_MS,
-                    memory: None,
-                    commit: None,
-                    state: WatchState::Gap,
-                });
+                points.push(WatchPoint::marker(previous.ts + SAMPLE_MS, WatchState::Gap));
             }
             points.push(entry.point.clone());
         }
@@ -371,12 +476,11 @@ impl ProgramWatch {
         let start = end.saturating_sub(PREVIEW_RUNS);
         let runs = runs[start..end].to_vec();
         WatchView {
-            version: 2,
+            version: super::VERSION,
             pid: key.0,
             create_time: key.1,
             name: self.store.meta.name.clone(),
-            program: Some(self.store.meta.program.clone()),
-            mode: WatchMode::Program,
+            program: self.store.meta.program.clone(),
             state: self.state,
             points,
             runs,
@@ -415,10 +519,10 @@ mod tests {
             &dir.join(store::FILE_NAME),
             Metadata {
                 name: "same.exe".into(),
-                program: super::super::ProgramIdentity {
+                program: Some(super::super::ProgramIdentity {
                     native_path: "\\Device\\disk\\same.exe".into(),
                     display_path: "C:\\same.exe".into(),
-                },
+                }),
             },
         )
         .unwrap();
@@ -429,10 +533,9 @@ mod tests {
                     17,
                     100,
                     WatchPoint {
-                        ts: start + i * SAMPLE_MS,
                         memory: Some(i as u64),
                         commit: Some(0),
-                        state: WatchState::Recording,
+                        ..WatchPoint::marker(start + i * SAMPLE_MS, WatchState::Recording)
                     },
                 )
                 .unwrap();
@@ -443,10 +546,9 @@ mod tests {
                     pid,
                     i64::from(pid),
                     WatchPoint {
-                        ts: start + 2000 * SAMPLE_MS,
                         memory: Some(0),
                         commit: Some(0),
-                        state: WatchState::Recording,
+                        ..WatchPoint::marker(start + 2000 * SAMPLE_MS, WatchState::Recording)
                     },
                 )
                 .unwrap();
@@ -483,6 +585,7 @@ mod tests {
             system: Default::default(),
             hardware: Default::default(),
             sessions: Vec::new(),
+            leaks: Vec::new(),
             process_network: false,
             processes: vec![crate::ProcessRow {
                 pid: std::process::id(),
@@ -502,6 +605,7 @@ mod tests {
             system: Default::default(),
             hardware: Default::default(),
             sessions: Vec::new(),
+            leaks: Vec::new(),
             process_network: false,
             processes: Vec::new(),
         };
@@ -536,6 +640,7 @@ mod tests {
             system: Default::default(),
             hardware: Default::default(),
             sessions: Vec::new(),
+            leaks: Vec::new(),
             process_network: false,
             processes: keys
                 .iter()

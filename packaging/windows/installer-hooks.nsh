@@ -39,6 +39,14 @@
     ClearErrors
   ${EndIf}
 !endif
+
+  ; An update replaces argus.exe, and the refresh above argus.ico, under the
+  ; same names. Explorer caches icons by path and index, so the shortcuts on
+  ; the desktop, in Start and pinned to the taskbar, the taskbar button and
+  ; the Apps list would keep the previous version's icon. SHCNE_ASSOCCHANGED
+  ; makes the shell drop its icon cache; SHCNF_FLUSHNOWAIT starts delivering
+  ; it before returning without waiting on a window that does not respond.
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0x3000, p 0, p 0)'
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -62,6 +70,15 @@
       !insertmacro ARGUS_TEXT $2 ArgusDisableAdmin
       MessageBox MB_OK|MB_ICONSTOP "$2" /SD IDOK
       Abort
+    ${EndIf}
+
+    ; No service registered, though another program (a security product, say)
+    ; may have deleted the registration and left its files: those go without a
+    ; question. --argus-service-remove does only that then, and returns 0.
+    ClearErrors
+    ReadRegStr $1 HKLM "SYSTEM\CurrentControlSet\Services\ArgusPrivileged" "ImagePath"
+    ${If} ${Errors}
+      ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --argus-service-remove'
     ${EndIf}
 
     !insertmacro ARGUS_TEXT $2 ArgusRemoveService
@@ -95,7 +112,8 @@
 
     ; Last, after the helpers above may have written failure reports: remove
     ; them, the PawnIO setup lock and staging leftovers from Program Files\Argus
-    ; Sensor Setup, then the empty folder. Never blocks the uninstall.
+    ; Privileged\setup (and Argus Sensor Setup, where 0.5 and earlier kept them),
+    ; then the empty folders. Never blocks the uninstall.
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --argus-sensor-setup-remove'
     ClearErrors
   ${EndIf}

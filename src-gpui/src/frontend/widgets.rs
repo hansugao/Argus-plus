@@ -13,7 +13,8 @@ pub(in crate::frontend) enum Tone {
 
 /// A deferred piece of work on the desktop: a toast action, a confirmed step.
 pub(in crate::frontend) type Handler = Rc<dyn Fn(&mut Desktop, &mut Window, &mut Context<Desktop>)>;
-type Pick = Rc<dyn Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>)>;
+pub(in crate::frontend) type Pick =
+    Rc<dyn Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::frontend) enum ToastKind {
@@ -48,6 +49,9 @@ pub(in crate::frontend) struct OpenSelect {
     pub pick: Pick,
     pub opened: Instant,
     pub scroll: ScrollHandle,
+    /// An option that acts even while it is the selected one (one opening a
+    /// dialog).
+    pub again: Option<usize>,
 }
 
 /// The show/hide hotkey card's recording session.
@@ -489,7 +493,9 @@ pub(in crate::frontend) fn placeholder(
         .text_size(theme::font(13.))
         .line_height(rems(1.25))
         .text_color(p.faint)
-        .child(text)
+        // The input under it is named by the same text: assistive technology
+        // would read it twice.
+        .child(Text::new_inaccessible(text))
 }
 
 /// The input element of every text box, with its context menu in the
@@ -526,8 +532,8 @@ const TOOLTIP_SIZE: f32 = 12.;
 /// UI's ascent and descent, 1.33 em), as the system draws tooltip text.
 const TOOLTIP_LINE_HEIGHT: f32 = 4. / 3.;
 
-/// A hover hint as it shows: not at all while a context menu is open or
-/// fading out (`menus::in_the_way`).
+/// A hover hint as it shows: not at all while a context menu is open
+/// (`menus::in_the_way`).
 struct Hint(AnyView);
 
 impl Render for Hint {
@@ -641,6 +647,9 @@ impl ButtonExt for gpui_kit::base::Button {
 
 /// How long a segmented control's selection takes to glide to another choice.
 const SLIDE: Duration = Duration::from_millis(250);
+/// A superseded drop-down at rest (`select_superseded`): as faded as a
+/// disabled control (`inert_dimmed`).
+const SUPERSEDED_OPACITY: f32 = 0.5;
 
 impl Desktop {
     /// A segmented control (`.segmented`): a layer-coloured track with a
@@ -798,11 +807,12 @@ impl Desktop {
         for (index, (name, glyph, action, _)) in choices.into_iter().enumerate() {
             let chosen = index == selected;
             let icon_only = name.is_empty();
-            let accessible = if icon_only && let Action::View(mode) = &action {
-                label(&format!("shell.viewMode.{mode}.label"))
-            } else {
-                name.clone()
-            };
+            let accessible =
+                if icon_only && let Action::View(mode) | Action::ConnectionView(mode) = &action {
+                    label(&format!("shell.viewMode.{mode}.label"))
+                } else {
+                    name.clone()
+                };
             let color = if chosen { p.ink } else { p.muted };
             let hover = p.hover;
             let ink = p.ink;
@@ -1264,7 +1274,29 @@ impl Desktop {
         pick: impl Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.select_with(id, name, options, selected, disabled, false, pick, cx)
+        self.select_with(
+            id, name, options, selected, disabled, false, false, pick, cx,
+        )
+    }
+
+    /// A drop-down for a setting that another one overrides for now:
+    /// `superseded`, it is faded as a disabled one is, but still opens and
+    /// takes a choice, which applies once the setting does again. It comes
+    /// up to full strength on hover and while open.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::frontend) fn select_superseded(
+        &self,
+        id: impl Into<SharedString>,
+        name: impl Into<SharedString>,
+        options: Vec<String>,
+        selected: Option<usize>,
+        superseded: bool,
+        pick: impl Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.select_with(
+            id, name, options, selected, false, false, superseded, pick, cx,
+        )
     }
 
     /// A drop-down inside a chart label (`.select.compact`): the label's size
@@ -1280,7 +1312,7 @@ impl Desktop {
         pick: impl Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.select_with(id, name, options, selected, false, true, pick, cx)
+        self.select_with(id, name, options, selected, false, true, false, pick, cx)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1292,6 +1324,7 @@ impl Desktop {
         selected: Option<usize>,
         disabled: bool,
         compact: bool,
+        superseded: bool,
         pick: impl Fn(&mut Desktop, usize, &mut Window, &mut Context<Desktop>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1309,23 +1342,7 @@ impl Desktop {
                 if this.ui.select.as_ref().is_some_and(|s| s.id == id) {
                     this.close_select();
                 } else {
-                    let anchor = this
-                        .ui
-                        .anchors
-                        .borrow()
-                        .get(&id)
-                        .copied()
-                        .unwrap_or_default();
-                    this.ui.select = Some(OpenSelect {
-                        id: id.clone(),
-                        options: options.clone(),
-                        selected,
-                        active: selected.unwrap_or(0),
-                        anchor,
-                        pick: pick.clone(),
-                        opened: Instant::now(),
-                        scroll: ScrollHandle::new(),
-                    });
+                    this.open_select(id.clone(), options.clone(), selected, None, pick.clone());
                 }
                 window.refresh();
                 cx.notify();
@@ -1355,7 +1372,11 @@ impl Desktop {
             .justify_start()
             .rounded(px(4.))
             .border_1()
-            .hover(move |s| s.bg(p.control_hover))
+            .hover(move |s| {
+                let s = s.bg(p.control_hover);
+                if superseded { s.opacity(1.) } else { s }
+            })
+            .when(superseded && !open, |b| b.opacity(SUPERSEDED_OPACITY))
             .map(|button| {
                 if compact {
                     button
@@ -1502,6 +1523,66 @@ impl Desktop {
             .into_any_element()
     }
 
+    /// Opens a drop-down's list at the control anchored as `id`: under it, or
+    /// over it where there is no room; at least as wide as the control.
+    pub(in crate::frontend) fn open_select(
+        &mut self,
+        id: impl Into<SharedString>,
+        options: Vec<String>,
+        selected: Option<usize>,
+        again: Option<usize>,
+        pick: Pick,
+    ) {
+        let id = id.into();
+        let anchor = self
+            .ui
+            .anchors
+            .borrow()
+            .get(&id)
+            .copied()
+            .unwrap_or_default();
+        self.ui.select = Some(OpenSelect {
+            id,
+            options,
+            selected,
+            active: selected.unwrap_or(0),
+            anchor,
+            pick,
+            opened: Instant::now(),
+            scroll: ScrollHandle::new(),
+            again,
+        });
+    }
+
+    /// The keys of an open drop-down whose control does not hold the focus
+    /// (one opened from a pill): what a combo box's own keys do.
+    pub(in crate::frontend) fn select_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(open) = &mut self.ui.select else {
+            return false;
+        };
+        let last = open.options.len().saturating_sub(1);
+        match key {
+            "up" => open.active = open.active.saturating_sub(1),
+            "down" => open.active = (open.active + 1).min(last),
+            "home" => open.active = 0,
+            "end" => open.active = last,
+            "enter" | "space" => {
+                self.pick_select(None, window, cx);
+                return true;
+            }
+            "escape" | "tab" => self.close_select(),
+            _ => return false,
+        }
+        window.refresh();
+        cx.notify();
+        true
+    }
+
     /// Closes the open drop-down; its list fades out.
     pub(in crate::frontend) fn close_select(&mut self) {
         if let Some(open) = self.ui.select.take() {
@@ -1525,7 +1606,8 @@ impl Desktop {
         if let Some(focus) = focus {
             focus.focus(window, cx);
         }
-        if Some(index) != open.selected && index < open.options.len() {
+        if (Some(index) != open.selected || Some(index) == open.again) && index < open.options.len()
+        {
             (open.pick)(self, index, window, cx);
         }
         window.refresh();
@@ -1542,24 +1624,26 @@ impl Desktop {
         const GAP: f32 = 4.;
         const MARGIN: f32 = 8.;
         let reduce = cx.reduce_motion();
-        // A closed list rolls up toward its control over 83 ms, without taking
-        // input. It does not fade out: see `menus::rolled`.
+        // The list unrolls from its control over 167 ms, decelerating, and a
+        // closed one rolls back up toward it over 83 ms, from as far as it had
+        // come, without taking input. Neither fades: see `menus::rolled`.
+        let unrolled = |open: &OpenSelect, at: Instant| {
+            if reduce {
+                1.
+            } else {
+                let elapsed = at.saturating_duration_since(open.opened).as_secs_f32();
+                theme::ease_out((elapsed / 0.167).min(1.))
+            }
+        };
         let leaving = self.ui.select_leaving.as_ref().and_then(|(open, at)| {
             let left = 1. - at.elapsed().as_secs_f32() / 0.083;
-            (!reduce && left > 0.).then_some((open, left))
+            (!reduce && left > 0.).then(|| (open, left * unrolled(open, *at)))
         });
         let interactive = self.ui.select.is_some();
         let (open, shown) = match (&self.ui.select, leaving) {
-            (Some(open), _) => (open, 1.),
-            (None, Some((open, left))) => (open, left),
+            (Some(open), _) => (open, unrolled(open, Instant::now())),
+            (None, Some((open, shown))) => (open, shown),
             (None, None) => return None,
-        };
-        // Grows in over 167 ms, decelerating (`flyout-in`; its slight scale is
-        // left out). One closed meanwhile goes on fading in.
-        let opacity = if reduce {
-            1.
-        } else {
-            theme::ease_out((open.opened.elapsed().as_secs_f32() / 0.167).min(1.))
         };
         let p = self.palette;
         let viewport = window.viewport_size();
@@ -1570,6 +1654,7 @@ impl Desktop {
         let up = below < wanted && above > below;
         let max_height = (if up { above } else { below }).max(ITEM * 3.);
         let height = wanted.min(max_height);
+        let scrolls = wanted > max_height;
         let top = if up {
             anchor.top() - px(GAP + height)
         } else {
@@ -1579,7 +1664,7 @@ impl Desktop {
             .left()
             .min(viewport.width - px(MARGIN) - anchor.size.width)
             .max(px(MARGIN));
-        if opacity < 1. || shown < 1. {
+        if shown < 1. {
             window.request_animation_frame();
         }
         let list = div()
@@ -1590,15 +1675,15 @@ impl Desktop {
             .max_h(px(max_height))
             .overflow_y_scroll()
             .p(px(4.))
-            // The gutter is kept (`scrollbar-gutter: stable`).
-            .pr(px(4. + scrollbar::SIZE))
+            // The gutter is kept while the list scrolls (`scrollbar-gutter:
+            // stable`); one that fits leaves no room on the right.
+            .pr(px(4. + if scrolls { scrollbar::SIZE } else { 0. }))
             .border_1()
             .border_color(p.stroke_strong)
             .rounded(px(8.))
             // No shadow, as the interface's menus and lists (window.md); opaque,
             // to keep the flyout readable over other content.
             .bg(solid(p.flyout))
-            .opacity(opacity)
             .text_size(theme::font(13.))
             .text_color(p.ink)
             .on_scroll(|_, _, cx| cx.stop_propagation())
@@ -1643,8 +1728,9 @@ impl Desktop {
             }))
             .child(scrollbar::scrollbar("select-scrollbar", &open.scroll, p.dark).border(1.));
         let list = if shown < 1. {
-            // What is left of the list, from the edge at its control (the
-            // bottom of a list above it), with the list drawn where it was.
+            // As much of the list as has unrolled, or is left, from the edge
+            // at its control (the bottom of a list above it), the list drawn
+            // where it stands open.
             let clip = px(height * shown);
             let hidden = if up { px(height) - clip } else { px(0.) };
             div()
